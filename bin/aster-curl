@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+# Exit on errors and undefined variables.
+set -euo pipefail
+
+# Locate the project root relative to this script.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load project environment variables.
+if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
+    echo "Error: .env file not found in $PROJECT_ROOT" >&2
+    exit 1
+fi
+
+set -a
+source "$PROJECT_ROOT/.env"
+set +a
+
+# Ensure the required token exists.
+if [[ -z "${ASTER_OWNER_TOKEN:-}" ]]; then
+    echo "Error: ASTER_OWNER_TOKEN is not configured" >&2
+    exit 1
+fi
+
+# Execute curl with the authorization header.
+exec curl \
+    -H "Authorization: Bearer ${ASTER_OWNER_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -w '\n' \
+    "$@"
