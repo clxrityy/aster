@@ -1,0 +1,9 @@
+.DS_Store
+/target/
+.env
+.env.*
+!.env.example
+/data/
+/backups/
+*.log
+.idea/

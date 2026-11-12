@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust 1.99.1 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting without modifying source
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit and non-database tests
+        run: cargo test --workspace --locked
+
+  postgres:
+    name: PostgreSQL 13.23 integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:13.23
+        env:
+          POSTGRES_USER: aster_ci
+          POSTGRES_DB: aster_ci
+          # Throwaway CI-only credentials, not deployment secrets.
+          POSTGRES_PASSWORD: ci_only_disposable_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aster_ci -d aster_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # The disposable bootstrap role can create SQLx's isolated test databases.
+      DATABASE_URL: postgres://aster_ci:ci_only_disposable_password@127.0.0.1:5432/aster_ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.1
+      - name: Include ignored isolated PostgreSQL tests
+        run: cargo test --workspace --locked -- --include-ignored

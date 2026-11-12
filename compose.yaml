@@ -1,0 +1,74 @@
+# Local development only. The PostgreSQL bootstrap role is a superuser.
+# Before remote use: least-privilege database roles and an explicit TLS boundary.
+services:
+  db:
+    image: postgres:13.23
+    environment:
+      POSTGRES_USER: aster
+      POSTGRES_DB: aster
+      # Owner must supply at least 32 random hex characters; required != validated.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env to at least 32 random hexadecimal characters}"
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 uses versioned PGDATA beneath this parent directory.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aster", "-d", "aster"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  aster-init:
+    image: aster:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["init"]
+    environment:
+      DATABASE_URL: "postgres://aster:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env to at least 32 random hexadecimal characters}@db:5432/aster"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  aster:
+    image: aster:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve"]
+    environment:
+      DATABASE_URL: "postgres://aster:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env to at least 32 random hexadecimal characters}@db:5432/aster"
+      ASTER_OWNER_TOKEN: "${ASTER_OWNER_TOKEN:?Set ASTER_OWNER_TOKEN in .env to 64 random hexadecimal characters}"
+      ASTER_BIND_ADDR: "0.0.0.0:3000"
+      # Container networking only; the host publication remains loopback-only.
+      ASTER_ALLOW_REMOTE: "true"
+    ports:
+      - "127.0.0.1:${ASTER_PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      aster-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # Liveness only: this deliberately does not claim database readiness.
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1:3000/health/live",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
