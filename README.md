@@ -5,7 +5,7 @@ local-first Rust/PostgreSQL foundation with persistent identity, an initial regu
 - [native quickstart](#native-quickstart)
     - for running natively on your machine
 - [local containers](#local-containers)
-    - for running with Docker
+    - for running with Docker or Podman
 - [HTTP interface](#http-interface-read-only)
     - for accessing the HTTP API in read-only mode
 
@@ -66,16 +66,20 @@ cargo build --locked --release -p aster-api
 
 ## local containers
 
-> requires [Docker](https://www.docker.com/) and [Docker Compose](https://docs.docker.com/compose/)
+> requires [Docker](https://www.docker.com/) and [Docker Compose](https://docs.docker.com/compose/), or [Podman](https://podman.io/) with [Podman Compose](https://github.com/containers/podman-compose)
 
 - manually set `.env`
     - **`POSTGRES_PASSWORD`** -> at least 32 random hex characters
     - **`ASTER_OWNER_TOKEN`**
-- build the docker container as the owner
-
-    ```bash
-    docker compose up --build -d
-    ```
+- build the container as the owner
+    - **docker**:
+        ```bash
+        docker compose up --build -d
+        ```
+    - **podman**:
+        ```bash
+        podman-compose up --build -d
+        ```
 
     <details>
     <summary>details</summary>
@@ -88,8 +92,8 @@ cargo build --locked --release -p aster-api
     > optional `POSTGRES_PORT` & `ASTER_PORT` avoid conflicts with other services on the host
     </details>
 
-- inspect with `docker compose ps`
-- stop with `docker compose down`
+- inspect with `docker compose ps` or `podman-compose ps`
+- stop with `docker compose down` or `podman-compose down`
 
 ## HTTP interface (read-only)
 
