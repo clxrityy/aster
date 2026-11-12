@@ -1,12 +1,12 @@
 # Requested toolchain/image tags; image availability and builds are unverified.
-FROM rust:1.99.1-bookworm AS builder
+FROM docker.io/library/rust:1.99.1-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
 RUN cargo build --locked --release -p aster-api
 
-FROM debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* \

@@ -2,7 +2,7 @@
 # Before remote use: least-privilege database roles and an explicit TLS boundary.
 services:
   db:
-    image: postgres:13.23
+    image: docker.io/library/postgres:13.23
     environment:
       POSTGRES_USER: aster
       POSTGRES_DB: aster
