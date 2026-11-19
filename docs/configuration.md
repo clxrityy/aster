@@ -24,7 +24,7 @@ An invalid value is rejected and the old config stays active. The console shows 
 | `server` | body limit, request timeout, rate limit, ingest dir | yes |
 | `database` | pool size, timeouts | restart |
 | `runtime` | tick, pause, initiative limits, expiry, rest, snapshots kept | yes |
-| `cognition` | n-gram order, reply length, recall, learning rate, **bounds** for self-regulation | yes |
+| `cognition` | n-gram order, reply length, recall, learning rate, **bounds** for self-regulation, `starter_pack` | yes |
 | `regulation` | per-level baseline/decay/**bounds**, per-event deltas | yes |
 | `logs` | directory, categories, retention | yes |
 | `console` | server URL, trace panel, rating prompt | console restart |

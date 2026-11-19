@@ -55,6 +55,14 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
     client.spawn_events(tx);
 
     let mut terminal = ratatui::init();
+    // Mouse wheel scrolls panes. Undo it on panic too, or the shell is left
+    // receiving mouse escape codes.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+        previous_hook(info);
+    }));
     let result = loop {
         if let Err(error) = terminal.draw(|frame| ui::draw(frame, &app)) {
             break Err(error.into());
@@ -70,6 +78,7 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
             break Ok(());
         }
     };
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }

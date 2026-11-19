@@ -1,35 +1,76 @@
 //! Layout: transcript on the left; levels, inbox, and thought trace on the
-//! right; input and status at the bottom.
+//! right; input and status at the bottom. The conversation, inbox, and trace
+//! wrap their full text and scroll independently; the focused one is
+//! highlighted.
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use serde_json::Value;
 
-use crate::app::{App, LEVELS, Mode, Who};
+use crate::app::{App, LEVELS, Mode, Pane, PaneView, Who};
 
 const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-fn clip(text: &str, max: usize) -> String {
-    let flat = text.replace('\n', " ");
-    if flat.chars().count() <= max {
-        flat
+/// Draw wrapped lines in a bordered pane that scrolls on its own, with a
+/// scrollbar when the content is taller than the pane.
+fn draw_scrolled(
+    frame: &mut Frame,
+    app: &App,
+    pane: Pane,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    title: &str,
+) {
+    let focused = app.focus == pane;
+    let border = if focused {
+        Style::new().fg(Color::Cyan)
     } else {
-        format!(
-            "{}…",
-            flat.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
-    }
-}
+        Style::new().fg(Color::DarkGray)
+    };
+    let block = Block::bordered().border_style(border);
+    let inner = block.inner(area);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let height = inner.height as usize;
+    let max = paragraph.line_count(inner.width).saturating_sub(height);
+    let offset = app.offset(pane, max);
+    app.record_view(pane, PaneView { area, max, height });
 
-/// Rows a line occupies when wrapped to `width` columns.
-fn rows(line: &Line, width: usize) -> usize {
-    let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    chars.max(1).div_ceil(width.max(1))
+    let mut title = Span::raw(format!(" {title} "));
+    if focused {
+        title = title.style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    }
+    let mut titles = vec![title];
+    if max > 0 && offset < max {
+        titles.push(Span::styled(
+            format!(" ↓ {} more ", max - offset),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    frame.render_widget(
+        paragraph
+            .scroll((offset.min(u16::MAX as usize) as u16, 0))
+            .block(block.title(Line::from(titles))),
+        area,
+    );
+    if max > 0 {
+        let mut state = ScrollbarState::new(max).position(offset);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(border),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -135,40 +176,26 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     if lines.is_empty() {
         lines.push(Line::from("Say hello, or type /help.".dark_gray()));
     }
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let total: usize = lines.iter().map(|l| rows(l, inner_width)).sum();
-    let max_scroll = total.saturating_sub(inner_height);
-    let offset = max_scroll.saturating_sub(app.scroll.min(max_scroll));
-    let title = if app.scroll > 0 {
-        format!(" conversation (↑{}) ", app.scroll)
-    } else {
-        " conversation ".into()
-    };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((offset.min(u16::MAX as usize) as u16, 0))
-            .block(Block::bordered().title(title)),
-        area,
-    );
+    draw_scrolled(frame, app, Pane::Conversation, area, lines, "conversation");
 }
 
 fn draw_side(frame: &mut Frame, app: &App, area: Rect) {
     let constraints = if app.show_trace {
         vec![
             Constraint::Length(9),
-            Constraint::Length(8),
-            Constraint::Min(6),
+            Constraint::Fill(1),
+            Constraint::Fill(2),
         ]
     } else {
-        vec![Constraint::Length(9), Constraint::Min(6)]
+        vec![Constraint::Length(9), Constraint::Fill(1)]
     };
     let areas = Layout::vertical(constraints).split(area);
     draw_levels(frame, app, areas[0]);
     draw_inbox(frame, app, areas[1]);
     if app.show_trace {
         draw_trace(frame, app, areas[2]);
+    } else {
+        app.record_view(Pane::Trace, PaneView::default());
     }
 }
 
@@ -234,7 +261,6 @@ fn draw_levels(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_inbox(frame: &mut Frame, app: &App, area: Rect) {
-    let width = area.width.saturating_sub(8) as usize;
     let lines: Vec<Line> = if app.inbox.is_empty() {
         vec![Line::from("nothing waiting".dark_gray())]
     } else {
@@ -251,15 +277,23 @@ fn draw_inbox(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(vec![
                     Span::raw(format!("{}. ", i + 1)),
                     marker,
-                    Span::raw(clip(item["draft"]["body"].as_str().unwrap_or(""), width)),
+                    Span::raw(
+                        item["draft"]["body"]
+                            .as_str()
+                            .unwrap_or("")
+                            .replace('\n', " "),
+                    ),
                 ])
             })
             .collect()
     };
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::bordered().title(" inbox · /answer n · /approve n · /deny n ")),
+    draw_scrolled(
+        frame,
+        app,
+        Pane::Inbox,
         area,
+        lines,
+        "inbox · /answer n · /approve n · /deny n",
     );
 }
 
@@ -268,8 +302,7 @@ fn num(value: &Value) -> f64 {
 }
 
 fn draw_trace(frame: &mut Frame, app: &App, area: Rect) {
-    let width = area.width.saturating_sub(4) as usize;
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
     match &app.trace {
         None => lines.push(Line::from("no decision yet".dark_gray())),
         Some(trace) => {
@@ -303,49 +336,47 @@ fn draw_trace(frame: &mut Frame, app: &App, area: Rect) {
             if !unknown.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled("unknown ", Style::new().fg(Color::LightMagenta)),
-                    Span::raw(clip(&unknown.join(", "), width.saturating_sub(8))),
+                    Span::raw(unknown.join(", ")),
                 ]));
             }
             if let Some(recalled) = trace["recalled"].as_array().filter(|r| !r.is_empty()) {
                 lines.push(Line::from("recalled".dark_gray()));
-                for item in recalled.iter().take(3) {
+                for item in recalled {
                     lines.push(Line::from(format!(
                         " {:>5.2} {}",
                         num(&item["score"]),
-                        clip(
-                            item["excerpt"].as_str().unwrap_or(""),
-                            width.saturating_sub(7)
-                        )
+                        item["excerpt"].as_str().unwrap_or("").replace('\n', " ")
                     )));
                 }
             }
             let chosen = trace["chosen"].as_u64();
             if let Some(candidates) = trace["candidates"].as_array() {
                 lines.push(Line::from("candidates".dark_gray()));
-                for (i, candidate) in candidates.iter().enumerate().take(5) {
+                for (i, candidate) in candidates.iter().enumerate() {
                     let mark = if chosen == Some(i as u64) { "▶" } else { " " };
                     let source = candidate["source"].as_str().unwrap_or("");
                     lines.push(Line::from(vec![
                         Span::styled(mark, Style::new().fg(Color::Green)),
                         Span::raw(format!("{:>5.2} ", num(&candidate["score"]))),
                         Span::styled(format!("{:<11} ", source), Style::new().fg(Color::DarkGray)),
-                        Span::raw(clip(
-                            candidate["text"].as_str().unwrap_or(""),
-                            width.saturating_sub(19),
-                        )),
+                        Span::raw(candidate["text"].as_str().unwrap_or("").replace('\n', " ")),
                     ]));
                 }
             }
             for note in trace["notes"].as_array().into_iter().flatten() {
                 lines.push(Line::from(
-                    clip(note.as_str().unwrap_or(""), width).dark_gray(),
+                    note.as_str().unwrap_or("").to_string().dark_gray(),
                 ));
             }
         }
     }
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" thought trace · Tab hides ")),
+    draw_scrolled(
+        frame,
+        app,
+        Pane::Trace,
         area,
+        lines,
+        "thought trace · Ctrl-T hides",
     );
 }
 
@@ -452,6 +483,85 @@ mod tests {
         // Once in the transcript (deduplicated) and once as the trace candidate.
         assert_eq!(text.matches("Hi, I'm Aster.").count(), 2);
         // Small terminals must not panic.
+        screen(&app, 30, 10);
+    }
+
+    fn key(app: &mut App, code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) {
+        app.handle(Msg::Input(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(code, mods),
+        )));
+    }
+
+    #[test]
+    fn long_text_wraps_and_every_pane_scrolls() {
+        use crate::app::Pane;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut app = app();
+        let long = "I don't know what “photosynthesis” means yet and this question is long \
+                    enough that it never fits on one line of the inbox ENDOFQUESTION";
+        app.handle(Msg::Event(json!({
+            "type": "outbound", "at": "2026-11-19T10:00:02Z",
+            "item": { "id": "q1", "status": "pending", "needs_approval": false,
+                      "origin_turn": null, "draft": { "body": long } }
+        })));
+        let notes: Vec<String> = (0..40).map(|i| format!("note number {i}")).collect();
+        app.handle(Msg::Event(json!({
+            "type": "thought", "turn_id": "b",
+            "trace": { "decision": "ask", "confidence": 0.1, "threshold": 0.4,
+                       "exploration": 0.1, "unknown_terms": [], "recalled": [],
+                       "notes": notes, "candidates": [], "chosen": null }
+        })));
+        for i in 0..60 {
+            app.handle(Msg::Event(json!({
+                "type": "turn",
+                "turn": { "id": format!("t{i}"), "role": "aster", "text": format!("line {i}") }
+            })));
+        }
+
+        let text = screen(&app, 120, 40);
+        // Wrapped, not clipped with an ellipsis.
+        assert!(text.contains("ENDOFQUESTION"), "inbox text was cut off");
+        // The conversation follows the newest line; the trace starts at the top.
+        assert!(text.contains("line 59") && !text.contains("line 0 "));
+        assert!(text.contains("note number 0") && !text.contains("note number 39"));
+        assert!(text.contains("more"), "no hint that more is below");
+
+        // Tab to the inbox, then the trace, and page it down to the end.
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.focus, Pane::Inbox);
+        key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.focus, Pane::Trace);
+        key(&mut app, KeyCode::End, KeyModifiers::CONTROL);
+        let text = screen(&app, 120, 40);
+        assert!(text.contains("note number 39"));
+
+        // Scrolling the conversation up holds its place when new lines arrive.
+        key(&mut app, KeyCode::BackTab, KeyModifiers::NONE);
+        key(&mut app, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(app.focus, Pane::Conversation);
+        key(&mut app, KeyCode::Home, KeyModifiers::CONTROL);
+        app.handle(Msg::Event(json!({
+            "type": "turn", "turn": { "id": "new", "role": "aster", "text": "brand new line" }
+        })));
+        let text = screen(&app, 120, 40);
+        assert!(text.contains("line 0 ") && !text.contains("brand new line"));
+        key(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+        assert!(!app.scrolls[Pane::Conversation as usize].follow);
+        // Paging past the end reaches the bottom and follows again.
+        key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+        assert!(app.scrolls[Pane::Conversation as usize].follow);
+
+        // Sending snaps back to the newest line.
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let text = screen(&app, 120, 40);
+        assert!(text.contains("brand new line"));
+
+        // Hiding the trace moves focus off it.
+        app.focus = Pane::Trace;
+        key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(app.focus, Pane::Conversation);
         screen(&app, 30, 10);
     }
 }

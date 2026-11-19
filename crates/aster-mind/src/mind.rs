@@ -5,7 +5,7 @@
 //! is chosen by explicit scores recorded in the trace; when nothing scores high
 //! enough, Aster asks.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use aster_core::{
     Action, Candidate, CandidateSource, Cognition, CognitionParams, Decision, LearnOutcome,
@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    concepts::{Synonyms, stem},
     ngram::NgramModel,
+    pack::Pack,
     recall::RecallIndex,
     rng::Rng,
     text::{content_terms, excerpt, is_stopword, normalize, render, tokens, words},
@@ -30,6 +32,8 @@ const CURIOSITY_QUEUE: usize = 32;
 const MAX_WEIGHT: f64 = 3.0;
 const MIN_SIMILARITY: f64 = 0.2;
 const MIN_GENERATION_TOKENS: u64 = 30;
+/// Pack replies start below taught ones (1.0), so the owner's own replies win.
+const PACK_WEIGHT: f64 = 0.8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +42,8 @@ pub enum AssociationSource {
     Corrected,
     Answered,
     Reinforced,
+    /// Loaded from a pack (the built-in starter pack or an ingested `.aster` file).
+    Pack,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +87,12 @@ pub struct StatisticalMind {
     /// "it means …" can be understood.
     #[serde(default)]
     last_asked: Option<String>,
+    /// Words and phrases that mean the same thing, matched as one concept.
+    #[serde(default)]
+    synonyms: Synonyms,
+    /// Packs already loaded, by id, so each loads once.
+    #[serde(default)]
+    packs: BTreeSet<String>,
     recent: VecDeque<RecentTurn>,
     curious_about: VecDeque<String>,
     asked: HashSet<String>,
@@ -106,6 +118,8 @@ impl StatisticalMind {
             associations: Vec::new(),
             lexicon: BTreeMap::new(),
             last_asked: None,
+            synonyms: Synonyms::default(),
+            packs: BTreeSet::new(),
             recent: VecDeque::new(),
             curious_about: VecDeque::new(),
             asked: HashSet::new(),
@@ -206,24 +220,103 @@ impl StatisticalMind {
         note
     }
 
-    /// Find a meaning for a subject: exact, singular, then its last word.
+    /// Find a meaning for a subject: exactly, then as the same concept
+    /// (plural, synonym), then by its last word ("a big nebula" → "nebula").
     fn lookup(&self, subject: &str) -> Option<(String, String)> {
         let key = understand::key(subject);
-        let mut tries = vec![key.clone()];
-        if let Some(singular) = key.strip_suffix('s')
-            && singular.len() > 2
-        {
-            tries.push(singular.to_string());
+        if let Some(meaning) = self.lexicon.get(&key) {
+            return Some((key, meaning.clone()));
         }
-        if let Some(last) = key.rsplit(' ').next()
-            && last != key
-        {
-            tries.push(last.to_string());
-        }
-        tries.into_iter().find_map(|k| {
-            let meaning = self.lexicon.get(&k)?.clone();
-            Some((k, meaning))
+        let whole = Some(self.synonyms.concept(&key));
+        let last = key
+            .rsplit(' ')
+            .next()
+            .filter(|last| *last != key)
+            .map(|last| self.synonyms.concept(last));
+        [whole, last].into_iter().flatten().find_map(|target| {
+            self.lexicon
+                .iter()
+                .find(|(k, _)| self.synonyms.concept(k) == target)
+                .map(|(k, m)| (k.clone(), m.clone()))
         })
+    }
+
+    fn has_exact_reply(&self, prompt_words: &[String]) -> bool {
+        let concepts = self.synonyms.canonical(prompt_words);
+        self.associations
+            .iter()
+            .any(|a| a.weight > 0.0 && self.synonyms.canonical(&a.words) == concepts)
+    }
+
+    pub fn has_pack(&self, id: &str) -> bool {
+        self.packs.contains(id)
+    }
+
+    /// Load a pack of meanings, replies, and synonyms. Never overrides the
+    /// owner: existing meanings are kept, and a prompt the owner already taught
+    /// a reply for gets no pack reply.
+    pub fn load_pack(&mut self, id: &str, text: &str, params: &CognitionParams) -> String {
+        let pack = Pack::parse(text);
+        let order = params.ngram_order;
+        let mut meanings = 0;
+        for (subject, meaning) in &pack.meanings {
+            let key = understand::key(subject);
+            self.observe(meaning, order);
+            if key.is_empty() || self.lexicon.contains_key(&key) {
+                continue;
+            }
+            for word in key.split(' ') {
+                *self.vocab.entry(word.to_string()).or_default() += 1;
+            }
+            self.lexicon.insert(key, meaning.clone());
+            meanings += 1;
+        }
+        let mut replies = 0;
+        for (prompt, reply) in &pack.replies {
+            self.observe(prompt, order);
+            self.observe(reply, order);
+            let normalized_prompt = normalize(prompt);
+            let normalized_reply = normalize(reply);
+            let taken = self.associations.iter().any(|a| {
+                let same_prompt = normalize(&a.prompt) == normalized_prompt;
+                same_prompt
+                    && (a.source != AssociationSource::Pack
+                        || normalize(&a.reply) == normalized_reply)
+            });
+            if taken {
+                continue;
+            }
+            self.associations.push(Association {
+                prompt: prompt.clone(),
+                words: words(&tokens(prompt)),
+                reply: reply.clone(),
+                weight: PACK_WEIGHT,
+                uses: 0,
+                source: AssociationSource::Pack,
+            });
+            replies += 1;
+        }
+        let mut synonyms = 0;
+        for group in &pack.synonyms {
+            for member in group {
+                for word in words(&tokens(member)) {
+                    *self.vocab.entry(word).or_default() += 1;
+                }
+            }
+            synonyms += self.synonyms.add_group(group);
+        }
+        self.packs.insert(id.to_string());
+        self.updates += 1;
+        format!("loaded pack {id}: {meanings} meanings, {replies} replies, {synonyms} synonyms")
+    }
+
+    /// Whether a word is known: seen, a known form of a seen word, a synonym,
+    /// or something with a meaning.
+    fn knows(&self, term: &str) -> bool {
+        self.vocab.contains_key(term)
+            || self.vocab.contains_key(&stem(term))
+            || self.synonyms.contains(term)
+            || self.lexicon.contains_key(term)
     }
 
     /// A statement of meaning is accepted when it says "means", or when it is
@@ -337,7 +430,7 @@ impl Cognition for StatisticalMind {
         let terms = content_terms(&toks);
         let unknown: Vec<String> = terms
             .iter()
-            .filter(|term| !self.vocab.contains_key(*term))
+            .filter(|term| !self.knows(term))
             .cloned()
             .collect();
         let mut notes = Vec::new();
@@ -372,6 +465,9 @@ impl Cognition for StatisticalMind {
                     Chosen::Definition(understand::key(&subject)),
                 )
             }),
+            // A reply taught for exactly this phrasing ("what's new") wins
+            // over reading it as a question about a word's meaning.
+            Intent::AskMeaning { .. } if self.has_exact_reply(&prompt_words) => None,
             Intent::AskMeaning { subject } => {
                 asked_subject = Some(understand::key(subject));
                 self.lookup(subject).map(|(key, meaning)| {
@@ -391,10 +487,13 @@ impl Cognition for StatisticalMind {
         };
         self.last_asked = None;
 
-        // Candidates from associations.
+        // Candidates from associations, compared as concepts so plurals and
+        // synonyms match ("hey" finds a reply taught for "hello").
+        let prompt_concepts = self.synonyms.canonical(&prompt_words);
         let mut scored: Vec<(Candidate, Chosen)> = Vec::new();
         for (index, association) in self.associations.iter().enumerate() {
-            let similarity = Self::similarity(&prompt_words, &association.words);
+            let concepts = self.synonyms.canonical(&association.words);
+            let similarity = Self::similarity(&prompt_concepts, &concepts);
             if similarity < MIN_SIMILARITY {
                 continue;
             }
@@ -776,6 +875,14 @@ impl Cognition for StatisticalMind {
                     updated: removed,
                 }
             }
+            LearningSignal::Ingest { name, text } if name.ends_with(".aster") => {
+                let note = self.load_pack(&name, &text, params);
+                LearnOutcome {
+                    events: vec![RegulationEvent::Ingested],
+                    note,
+                    updated: true,
+                }
+            }
             LearningSignal::Ingest { name, text } => {
                 self.observe(&text, order);
                 let mut passages = 0;
@@ -858,6 +965,8 @@ impl Cognition for StatisticalMind {
             ("ngram_tokens".into(), self.ngram.tokens_seen as f64),
             ("associations".into(), self.associations.len() as f64),
             ("meanings".into(), self.lexicon.len() as f64),
+            ("synonyms".into(), self.synonyms.len() as f64),
+            ("packs".into(), self.packs.len() as f64),
             ("recall_documents".into(), self.recall.len() as f64),
             ("curiosity_queue".into(), self.curious_about.len() as f64),
             ("reward_ema".into(), self.reward_ema),
@@ -1123,6 +1232,114 @@ mod tests {
                 .1
                 .text
                 .contains("greeting")
+        );
+    }
+
+    fn starter() -> StatisticalMind {
+        let mut mind = StatisticalMind::new(&params());
+        mind.load_pack(crate::pack::STARTER_ID, crate::pack::STARTER, &params());
+        mind
+    }
+
+    /// The top-scored reply: what Aster understood, before exploration may
+    /// pick the runner-up on purpose.
+    fn best(mind: &mut StatisticalMind, text: &str) -> String {
+        let (_, response) = ask(mind, text);
+        response.trace.candidates[0].text.clone()
+    }
+
+    #[test]
+    fn starter_pack_understands_everyday_phrasings() {
+        let mut mind = starter();
+        for greeting in ["hello", "Hey!", "hi there", "Howdy", "greetings"] {
+            assert_eq!(
+                best(&mut mind, greeting),
+                "Hi! Good to see you.",
+                "{greeting}"
+            );
+        }
+        for (prompt, expected) in [
+            ("thank you so much", "You're welcome!"),
+            ("How's it going?", "I'm steady, thanks. How are you?"),
+            (
+                "what's new",
+                "Not much. I'm here and listening. What's new with you?",
+            ),
+            ("What's your name?", "I'm Aster."),
+            ("see ya", "Goodbye! Talk soon."),
+        ] {
+            assert_eq!(best(&mut mind, prompt), expected, "{prompt}");
+        }
+        // Meanings answer "what is", including plurals and synonyms.
+        assert!(ask(&mut mind, "what is a cat?").1.text.contains("purrs"));
+        assert!(ask(&mut mind, "what are dogs").1.text.contains("barks"));
+        assert!(
+            ask(&mut mind, "what does film mean")
+                .1
+                .text
+                .contains("moving pictures")
+        );
+        // Saying a known word isn't answered with its meaning.
+        assert!(!ask(&mut mind, "cat").1.text.contains("purrs"));
+        // Words outside the pack are still asked about.
+        let (_, r) = ask(&mut mind, "I saw a quokka");
+        assert_eq!(r.question.unwrap().subject.as_deref(), Some("quokka"));
+    }
+
+    #[test]
+    fn the_owner_wins_over_the_starter_pack() {
+        let mut mind = StatisticalMind::new(&params());
+        mind.learn(
+            LearningSignal::Teach {
+                prompt: "hello".into(),
+                reply: "Welcome home.".into(),
+            },
+            &params(),
+        );
+        mind.learn(
+            LearningSignal::Answer {
+                subject: Some("cat".into()),
+                prompt: None,
+                answer: "my favourite animal".into(),
+            },
+            &params(),
+        );
+        mind.load_pack(crate::pack::STARTER_ID, crate::pack::STARTER, &params());
+        let before = mind.associations().len();
+        mind.load_pack(crate::pack::STARTER_ID, crate::pack::STARTER, &params());
+        assert_eq!(
+            mind.associations().len(),
+            before,
+            "loading twice adds nothing"
+        );
+        assert_eq!(best(&mut mind, "hey"), "Welcome home.");
+        assert!(ask(&mut mind, "what is a cat").1.text.contains("favourite"));
+        assert!(mind.has_pack(crate::pack::STARTER_ID));
+    }
+
+    #[test]
+    fn packs_can_be_ingested() {
+        let mut mind = StatisticalMind::new(&params());
+        let outcome = mind.learn(
+            LearningSignal::Ingest {
+                name: "space.aster".into(),
+                text: "[meanings]\nquasar: a very bright galactic core\n\
+                       [synonyms]\nquasar, qso\n[replies]\nping => pong"
+                    .into(),
+            },
+            &params(),
+        );
+        assert!(
+            outcome.note.contains("1 meanings, 1 replies, 2 synonyms"),
+            "{}",
+            outcome.note
+        );
+        assert!(ask(&mut mind, "what is a qso").1.text.contains("galactic"));
+        assert_eq!(ask(&mut mind, "ping").1.text, "pong");
+        assert_eq!(
+            mind.recall_index().len(),
+            0,
+            "packs are not recall passages"
         );
     }
 

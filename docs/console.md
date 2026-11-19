@@ -32,9 +32,25 @@
 | `/status` · `/history` | mind stats · level changes |
 | `/snapshot [why]` · `/snapshots` · `/rollback <v>` | mind versions |
 | `/logs <category> [n]` | tail today's log |
-| `/trace` or `Tab` · `/clear` · `/help` · `/quit` | view |
+| `/trace` or `Ctrl-T` · `/mouse` · `/clear` · `/help` · `/quit` | view |
 
-Keys: `↑/↓` history, `PgUp/PgDn` scroll, `Esc` clear, `Ctrl-C` quit.
+Keys: `↑/↓` input history, `Esc` clear, `Ctrl-C` quit.
+
+## scrolling
+
+The conversation, inbox and thought trace each wrap their full text and scroll on their own. The focused pane has a cyan border. When there's more below, the title shows `↓ n more` and a scrollbar appears.
+
+| key | does |
+|---|---|
+| `Tab` · `Shift-Tab` | focus the next / previous pane |
+| `PgUp` · `PgDn` | scroll the focused pane a page |
+| `Shift-↑/↓` or `Alt-↑/↓` | scroll it a line |
+| `Ctrl-Home` · `Ctrl-End` | jump to its top / bottom |
+| mouse wheel · click | scroll / focus the pane under the pointer |
+
+The conversation follows new messages until you scroll up. Then it stays where you are until you scroll back to the bottom or send something. A new thought trace starts at its top.
+
+Mouse scrolling captures the mouse. To select and copy text, hold `Option` (macOS Terminal/iTerm) or `Shift` (most others) while dragging, or turn it off with `/mouse`.
 
 ```bash
 aster console --url http://127.0.0.1:3001   # other server

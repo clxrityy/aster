@@ -41,6 +41,7 @@ snapshot_every_updates = 20
 # rng_seed = 42                  # set for reproducible training sessions
 initiative_curiosity_min = 55.0  # curiosity needed before it asks on its own
 rest_energy_below = 25.0         # energy at which it requests rest
+starter_pack = true              # load built-in everyday words, replies, synonyms
 
 # Owner bounds for each level. Aster moves levels only inside min..=max.
 [regulation.levels]

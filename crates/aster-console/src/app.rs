@@ -1,8 +1,14 @@
 //! Console state, event handling, and slash commands.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, HashSet, VecDeque},
+};
 
-use crossterm::event::{Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 use reqwest::Method;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,6 +55,33 @@ pub struct Entry {
     pub rating: Option<i8>,
 }
 
+/// The scrollable panes, in focus order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pane {
+    Conversation = 0,
+    Inbox = 1,
+    Trace = 2,
+}
+
+pub const PANES: [Pane; 3] = [Pane::Conversation, Pane::Inbox, Pane::Trace];
+const WHEEL_LINES: usize = 3;
+
+/// Rows scrolled from the top. `follow` keeps the view pinned to the bottom
+/// (the conversation follows new lines until you scroll up).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Scroll {
+    pub offset: usize,
+    pub follow: bool,
+}
+
+/// What the last draw measured for a pane, so input can clamp and hit-test.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneView {
+    pub area: Rect,
+    pub max: usize,
+    pub height: usize,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Chat,
@@ -60,7 +93,10 @@ pub struct App {
     pub options: Options,
     tx: UnboundedSender<Msg>,
     pub transcript: Vec<Entry>,
-    pub scroll: usize,
+    pub focus: Pane,
+    pub scrolls: [Scroll; 3],
+    pub views: Cell<[PaneView; 3]>,
+    pub mouse: bool,
     pub input: String,
     pub cursor: usize,
     history: Vec<String>,
@@ -113,9 +149,12 @@ pub const HELP: &[&str] = &[
     "  /status  /history           mind statistics / recent level changes",
     "  /snapshot [reason]  /snapshots  /rollback <version>",
     "  /logs <category> [n]        tail today's JSONL log (conversations, thoughts, levels, …)",
-    "  /trace                      toggle the thought-trace panel",
+    "  /trace (Ctrl-T)             toggle the thought-trace panel",
+    "  /mouse                      toggle mouse scrolling (off lets you select text)",
     "  /clear  /help  /quit",
-    "Keys: Enter send · ↑/↓ input history · PgUp/PgDn scroll · Esc clear · Ctrl-C quit",
+    "Keys: Enter send · ↑/↓ input history · Esc clear · Ctrl-C quit",
+    "Scroll: Tab/Shift-Tab focus a pane · PgUp/PgDn page · Shift-↑/↓ line ·",
+    "        Ctrl-Home/End top/bottom · mouse wheel scrolls the pane under the pointer",
 ];
 
 impl App {
@@ -126,7 +165,17 @@ impl App {
             options,
             tx,
             transcript: Vec::new(),
-            scroll: 0,
+            focus: Pane::Conversation,
+            scrolls: [
+                Scroll {
+                    offset: 0,
+                    follow: true,
+                },
+                Scroll::default(),
+                Scroll::default(),
+            ],
+            views: Cell::new([PaneView::default(); 3]),
+            mouse: true,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
@@ -164,7 +213,100 @@ impl App {
             turn_id,
             rating: None,
         });
-        self.scroll = 0;
+    }
+
+    pub fn view(&self, pane: Pane) -> PaneView {
+        self.views.get()[pane as usize]
+    }
+
+    pub fn record_view(&self, pane: Pane, view: PaneView) {
+        let mut views = self.views.get();
+        views[pane as usize] = view;
+        self.views.set(views);
+    }
+
+    /// The offset a pane is drawn at, given its current maximum.
+    pub fn offset(&self, pane: Pane, max: usize) -> usize {
+        let scroll = self.scrolls[pane as usize];
+        if scroll.follow {
+            max
+        } else {
+            scroll.offset.min(max)
+        }
+    }
+
+    pub fn scroll_up(&mut self, pane: Pane, rows: usize) {
+        let current = self.offset(pane, self.view(pane).max);
+        self.scrolls[pane as usize] = Scroll {
+            offset: current.saturating_sub(rows),
+            follow: false,
+        };
+    }
+
+    pub fn scroll_down(&mut self, pane: Pane, rows: usize) {
+        let max = self.view(pane).max;
+        let next = (self.offset(pane, max) + rows).min(max);
+        self.scrolls[pane as usize] = Scroll {
+            offset: next,
+            follow: pane == Pane::Conversation && next >= max,
+        };
+    }
+
+    fn scroll_to_end(&mut self, pane: Pane, bottom: bool) {
+        self.scrolls[pane as usize] = Scroll {
+            offset: if bottom { self.view(pane).max } else { 0 },
+            follow: bottom && pane == Pane::Conversation,
+        };
+    }
+
+    fn page(&self, pane: Pane) -> usize {
+        self.view(pane).height.saturating_sub(1).max(1)
+    }
+
+    fn visible(&self, pane: Pane) -> bool {
+        pane != Pane::Trace || self.show_trace
+    }
+
+    fn cycle_focus(&mut self, forward: bool) {
+        let mut index = self.focus as usize;
+        loop {
+            index = if forward {
+                (index + 1) % PANES.len()
+            } else {
+                (index + PANES.len() - 1) % PANES.len()
+            };
+            if self.visible(PANES[index]) {
+                self.focus = PANES[index];
+                return;
+            }
+        }
+    }
+
+    fn toggle_trace(&mut self) {
+        self.show_trace = !self.show_trace;
+        if !self.show_trace && self.focus == Pane::Trace {
+            self.focus = Pane::Conversation;
+        }
+    }
+
+    fn set_trace(&mut self, trace: Value) {
+        self.trace = Some(trace);
+        self.scrolls[Pane::Trace as usize] = Scroll::default();
+    }
+
+    fn pane_at(&self, column: u16, row: u16) -> Option<Pane> {
+        PANES.into_iter().find(|pane| {
+            self.visible(*pane) && self.view(*pane).area.contains(Position::new(column, row))
+        })
+    }
+
+    fn set_mouse(&mut self, on: bool) {
+        self.mouse = on;
+        let _ = if on {
+            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+        } else {
+            crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+        };
     }
 
     /// Run a request in the background and feed its result back as a message.
@@ -258,7 +400,7 @@ impl App {
                 // The stream normally delivers these first; dedupe by id.
                 self.add_turn(&result["owner"]);
                 self.add_turn(&result["aster"]);
-                self.trace = Some(result["trace"].clone());
+                self.set_trace(result["trace"].clone());
                 self.set_levels(result["levels"].clone());
             }
             Msg::Print(lines) => {
@@ -316,7 +458,7 @@ impl App {
     fn on_event(&mut self, envelope: Value) {
         match envelope["type"].as_str().unwrap_or("") {
             "turn" => self.add_turn(&envelope["turn"]),
-            "thought" => self.trace = Some(envelope["trace"].clone()),
+            "thought" => self.set_trace(envelope["trace"].clone()),
             "levels" => self.set_levels(envelope["state"].clone()),
             "outbound" => {
                 let item = envelope["item"].clone();
@@ -394,6 +536,18 @@ impl App {
     }
 
     fn on_input(&mut self, event: TermEvent) {
+        if let TermEvent::Mouse(mouse) = event {
+            let Some(pane) = self.pane_at(mouse.column, mouse.row) else {
+                return;
+            };
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_up(pane, WHEEL_LINES),
+                MouseEventKind::ScrollDown => self.scroll_down(pane, WHEEL_LINES),
+                MouseEventKind::Down(MouseButton::Left) => self.focus = pane,
+                _ => {}
+            }
+            return;
+        }
         let TermEvent::Key(key) = event else {
             return;
         };
@@ -401,8 +555,17 @@ impl App {
             return;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let line_step = key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        let focus = self.focus;
         match key.code {
             KeyCode::Char('c') | KeyCode::Char('d') if ctrl => self.quit = true,
+            KeyCode::Char('t') if ctrl => self.toggle_trace(),
+            KeyCode::Up if line_step => self.scroll_up(focus, 1),
+            KeyCode::Down if line_step => self.scroll_down(focus, 1),
+            KeyCode::Home if ctrl => self.scroll_to_end(focus, false),
+            KeyCode::End if ctrl => self.scroll_to_end(focus, true),
             KeyCode::Char('u') if ctrl => {
                 self.input.clear();
                 self.cursor = 0;
@@ -429,12 +592,15 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
             }
-            KeyCode::PageUp => self.scroll += 5,
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(5),
+            KeyCode::PageUp => self.scroll_up(focus, self.page(focus)),
+            KeyCode::PageDown => self.scroll_down(focus, self.page(focus)),
             KeyCode::Up => self.recall_history(true),
             KeyCode::Down => self.recall_history(false),
-            KeyCode::Tab => self.show_trace = !self.show_trace,
+            KeyCode::Tab => self.cycle_focus(true),
+            KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Enter => {
+                // Sending jumps back to the latest conversation.
+                self.scroll_to_end(Pane::Conversation, true);
                 let line = std::mem::take(&mut self.input);
                 self.cursor = 0;
                 self.history_pos = None;
@@ -556,7 +722,16 @@ impl App {
                 self.awaiting_rating = false;
                 self.system("chat mode");
             }
-            "trace" => self.show_trace = !self.show_trace,
+            "trace" => self.toggle_trace(),
+            "mouse" => {
+                let on = !self.mouse;
+                self.set_mouse(on);
+                self.system(if on {
+                    "mouse on: wheel scrolls the pane under the pointer, click focuses it"
+                } else {
+                    "mouse off: drag to select and copy text; /mouse turns scrolling back on"
+                });
+            }
             "good" => self.rate(1, None),
             "bad" => self.rate(-1, None),
             "correct" if !rest.is_empty() => self.rate(-1, Some(rest.to_string())),

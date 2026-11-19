@@ -1,6 +1,8 @@
 # training
 
-Aster starts empty. It learns from:
+Aster starts with a small **starter pack**: a few hundred everyday meanings, small-talk replies, and synonym groups. It can greet you, answer "what is a cat", and understand that "hey", "hi" and "hello" mean the same thing from the first message. Everything you teach wins over the pack. Turn it off with `cognition.starter_pack = false` before the first start.
+
+It learns from:
 
 - **teaching:** `/teach hello => Hi, I'm Aster.`
 - **rating:** in `/train` mode, `+` reinforces and `-` weakens. Use `/correct Better reply.` to replace a bad reply.
@@ -32,6 +34,26 @@ what does hello mean          → "hello" means a friendly greeting.
 ```
 
 `/answer` works for either question. Rating a meaning with `-` forgets it; `/correct` replaces it.
+
+## packs
+
+A pack is a plain-text file of meanings, replies and synonyms. Write your own, save it as `data/ingest/<name>.aster`, and load it with `/ingest <name>.aster`:
+
+```
+# my pack
+[meanings]
+quasar: a very bright galactic core
+[replies]
+good morning aster => Morning! Ready when you are.
+[synonyms]
+quasar, qso, quasi-stellar object
+```
+
+- **meanings** answer "what is X". A meaning you already taught is kept.
+- **replies** start a little weaker than taught ones. A prompt you already taught a reply for is skipped.
+- **synonyms** are matched as one word everywhere: replies, meanings, and unknown-word detection. Plural and possessive forms (`stars`, `star's`) already match `star`.
+
+The built-in pack is [`crates/aster-mind/packs/starter.aster`](../crates/aster-mind/packs/starter.aster). It loads into new minds, and once into existing minds when you upgrade.
 
 How a reply is chosen (shown in the thought trace):
 

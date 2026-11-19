@@ -37,6 +37,10 @@ pub struct CognitionParams {
     pub initiative_curiosity_min: f64,
     /// Energy level below which Aster requests rest.
     pub rest_energy_below: f64,
+    /// Load the built-in starter pack (everyday meanings, small-talk replies,
+    /// synonyms) into new minds, and once into existing ones. Never overrides
+    /// what the owner taught.
+    pub starter_pack: bool,
 }
 
 impl Default for CognitionParams {
@@ -55,6 +59,7 @@ impl Default for CognitionParams {
             rng_seed: None,
             initiative_curiosity_min: 55.0,
             rest_energy_below: 25.0,
+            starter_pack: true,
         }
     }
 }
