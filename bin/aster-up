@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# aster-up: build if needed and start the stack in the background.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+mkdir -p "$(data_dir)/ingest" "$(data_dir)/logs"
+compose up -d --build "$@"
+say "waiting for Aster to come up…"
+for _ in $(seq 1 60); do
+    if curl --silent --fail "$(api_url)/health/live" >/dev/null 2>&1; then
+        say "up at $(api_url)"
+        [[ "$(aster_mode)" != deploy ]] || say "public: https://$(env_get ASTER_HOSTNAME "$(env_file)")"
+        exit 0
+    fi
+    sleep 2
+done
+die "Aster did not answer on $(api_url)/health/live; see: aster-logs"

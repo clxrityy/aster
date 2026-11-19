@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# aster-down: stop the stack. Data (database volume, ./data) is kept.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+for arg in "$@"; do
+    case "$arg" in
+        -v | --volumes) die "refusing to delete volumes: that erases Aster's database. Back up first, then remove volumes by hand if you really mean it." ;;
+    esac
+done
+compose down "$@"

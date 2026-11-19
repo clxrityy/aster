@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# aster <command> [args]: run an Aster CLI command wherever Aster runs.
+#   aster status | check-config | init | console
+#   aster --remote user@host console    run it on your VPS over SSH
+# Inside a running stack it execs into the container (token and config are
+# already there); otherwise it runs target/release/aster, building it first.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+if [[ "${1:-}" == "--remote" ]]; then
+    host="${2:?usage: aster --remote user@host <command>}"
+    shift 2
+    remote_dir="${ASTER_REMOTE_DIR:-aster}"
+    exec ssh -t "$host" "cd $(printf '%q' "$remote_dir") && bin/aster $(printf '%q ' "$@")"
+fi
+
+[[ $# -gt 0 ]] || set -- status
+
+if running; then
+    flags=()
+    [[ -t 0 && -t 1 ]] || flags=(-T)
+    compose exec "${flags[@]}" aster aster "$@"
+    exit
+fi
+
+binary="$ASTER_HOME/target/release/aster"
+if [[ ! -x "$binary" ]]; then
+    say "building target/release/aster (first run)…"
+    (cd "$ASTER_HOME" && cargo build --locked --release -p aster-api --features "${ASTER_FEATURES-neural}")
+fi
+# The binary reads ./.env, so run it from the repository root.
+cd "$ASTER_HOME"
+exec "$binary" "$@"

@@ -9,3 +9,6 @@
 .idea/
 /aster.toml
 /aster.toml.tmp
+# VPS deployment state (secrets live in deploy/.env, already ignored above)
+/deploy/data/
+/deploy/backups/

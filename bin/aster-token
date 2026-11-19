@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# aster-token show     print the owner token (to sign in to the dashboard)
+# aster-token rotate   replace it; signed-in browsers must sign in again
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+case "${1:-}" in
+    show)
+        [[ -t 1 ]] || die "refusing to print the token into a pipe or file; run it in a terminal"
+        owner_token
+        echo
+        ;;
+    rotate)
+        command -v openssl >/dev/null 2>&1 || die "openssl is required"
+        env_set ASTER_OWNER_TOKEN "$(openssl rand -hex 32)" "$(env_file)"
+        say "new token written to $(env_file)"
+        if running; then
+            compose up -d --no-deps --force-recreate aster
+            say "Aster restarted with the new token (dashboard sessions ended)."
+        fi
+        ;;
+    *) die "usage: aster-token show | rotate" ;;
+esac

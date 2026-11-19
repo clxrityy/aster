@@ -1,0 +1,109 @@
+# Aster on a VPS: PostgreSQL + Aster + nginx + Cloudflare Tunnel, under podman.
+#
+#   internet ──► Cloudflare (Access) ──tunnel──► cloudflared ──► nginx ──► aster ──► db
+#
+# Nothing listens on a public port. cloudflared dials out to Cloudflare, and
+# nginx is also published on 127.0.0.1 only (for SSH port-forwarding). The
+# database network is internal: no route to the internet at all.
+#
+# Set up with deploy/setup.sh; day to day use bin/aster-up, aster-logs, …
+# Secrets live in deploy/.env (chmod 600), never in this file.
+
+name: aster
+
+services:
+  db:
+    image: docker.io/library/postgres:13.23
+    environment:
+      POSTGRES_USER: aster
+      POSTGRES_DB: aster
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      # PostgreSQL 13 keeps its cluster in /var/lib/postgresql/data.
+      - postgres_data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aster -d aster"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  aster-init:
+    image: localhost/aster:latest
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        FEATURES: ${ASTER_FEATURES:-neural}
+    command: ["init"]
+    environment:
+      DATABASE_URL: postgres://aster:${POSTGRES_PASSWORD}@db:5432/aster
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  aster:
+    image: localhost/aster:latest
+    command: ["serve"]
+    environment:
+      DATABASE_URL: postgres://aster:${POSTGRES_PASSWORD}@db:5432/aster
+      ASTER_OWNER_TOKEN: ${ASTER_OWNER_TOKEN:?set ASTER_OWNER_TOKEN in deploy/.env}
+      # Inside the container network only; nginx is the boundary in front.
+      ASTER_BIND_ADDR: 0.0.0.0:3000
+      ASTER_ALLOW_REMOTE: "true"
+      ASTER_CONFIG: /app/data/aster.toml
+      RUST_LOG: ${RUST_LOG:-aster_api=info,aster_runtime=info,aster_storage=info}
+    volumes:
+      # A folder, not a file: /set replaces aster.toml atomically.
+      - ./data:/app/data:Z
+    # Keep ./data owned by the host user that runs podman (rootless).
+    userns_mode: "keep-id:uid=10001,gid=10001"
+    networks: [backend, edge]
+    depends_on:
+      db:
+        condition: service_healthy
+      aster-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  nginx:
+    image: docker.io/nginxinc/nginx-unprivileged:1.27-alpine
+    environment:
+      ASTER_HOSTNAME: ${ASTER_HOSTNAME:?set ASTER_HOSTNAME in deploy/.env}
+    volumes:
+      - ./nginx/aster.conf.template:/etc/nginx/templates/default.conf.template:ro,Z
+    ports:
+      # Loopback only: for `ssh -L 8080:127.0.0.1:8080 your-vps`. Never 0.0.0.0.
+      - "127.0.0.1:${ASTER_LOCAL_PORT:-8080}:8080"
+    networks: [edge]
+    depends_on:
+      aster:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:2024.12.2
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in deploy/.env}
+    networks: [edge]
+    depends_on: [nginx]
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true
+  edge: {}
+
+volumes:
+  postgres_data: {}

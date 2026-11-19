@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# aster-restore <backup-dir> [--with-config]: replace Aster's database with a
+# backup. A fresh backup of the current state is taken first.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+dir="${1:?usage: aster-restore <backup-dir> [--with-config]}"
+[[ -s "$dir/aster.dump" ]] || die "$dir/aster.dump not found"
+running || die "the stack is not running (aster-up first)"
+echo "This replaces Aster's database with $dir. Type 'restore' to continue:" >&2
+read -r answer
+[[ "$answer" == restore ]] || die "cancelled"
+
+say "backing up the current state first…"
+"$ASTER_HOME/bin/aster-backup" >/dev/null
+compose stop aster
+compose exec -T db pg_restore -U aster -d aster --clean --if-exists --no-owner <"$dir/aster.dump"
+if [[ "${2:-}" == --with-config && -f "$dir/aster.toml" ]]; then
+    cp "$dir/aster.toml" "$(data_dir)/aster.toml"
+fi
+compose start aster
+say "restored from $dir"

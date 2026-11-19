@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# aster-backup: dump the database and copy aster.toml + ingest/ into
+# backups/<timestamp>/ (private to you). Logs are not copied.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+running || die "the stack is not running (aster-up first)"
+dir="$(backups_dir)/$(date -u +%Y%m%dT%H%M%SZ)"
+umask 077
+mkdir -p "$dir"
+compose exec -T db pg_dump -U aster -d aster --format=custom >"$dir/aster.dump"
+[[ -s "$dir/aster.dump" ]] || die "pg_dump produced nothing; backup incomplete in $dir"
+data="$(data_dir)"
+[[ ! -f "$data/aster.toml" ]] || cp "$data/aster.toml" "$dir/"
+[[ ! -d "$data/ingest" ]] || cp -R "$data/ingest" "$dir/"
+say "backup written to $dir ($(du -sh "$dir" | cut -f1))"
+echo "$dir"

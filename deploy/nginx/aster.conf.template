@@ -1,0 +1,70 @@
+# nginx in front of Aster. Rendered at start by the image's envsubst step
+# (${ASTER_HOSTNAME} comes from deploy/.env). Cloudflare Tunnel connects here.
+
+map $http_cf_connecting_ip $client_ip {
+    ""      $remote_addr;
+    default $http_cf_connecting_ip;
+}
+
+log_format aster '$client_ip [$time_local] "$request" $status $body_bytes_sent $request_time';
+limit_req_zone $client_ip zone=signin:1m rate=10r/m;
+
+upstream aster {
+    server aster:3000;
+    keepalive 8;
+}
+
+# Anything not addressed to the dashboard's hostname is dropped.
+server {
+    listen 8080 default_server;
+    server_name _;
+    access_log off;
+    return 444;
+}
+
+server {
+    listen 8080;
+    # The public hostname, plus loopback for SSH port-forwarding.
+    server_name ${ASTER_HOSTNAME} localhost 127.0.0.1;
+
+    server_tokens off;
+    access_log /dev/stdout aster;
+    client_max_body_size 4m;
+    client_body_timeout 15s;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Real-IP $client_ip;
+    proxy_read_timeout 60s;
+
+    # Aster sets CSP and friends itself; these add transport-level hardening.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    # Sign-in is throttled here too (Aster also locks out repeated failures).
+    location = /v1/session {
+        limit_req zone=signin burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://aster;
+    }
+
+    # Live events: unbuffered, long-lived.
+    location = /v1/events {
+        proxy_pass http://aster;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        add_header X-Accel-Buffering no;
+    }
+
+    # Only what Aster serves; everything else is a 404 without reaching it.
+    location ~ ^/(v1/|assets/|health/live$|index\.html$|$) {
+        proxy_pass http://aster;
+    }
+
+    location / {
+        return 404;
+    }
+}

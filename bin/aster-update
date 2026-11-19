@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# aster-update: back up, pull the latest code, rebuild, and restart.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+if running; then
+    "$ASTER_HOME/bin/aster-backup" >/dev/null
+fi
+git -C "$ASTER_HOME" pull --ff-only
+compose build aster-init
+"$ASTER_HOME/bin/aster-up"

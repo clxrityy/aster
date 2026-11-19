@@ -1,0 +1,33 @@
+# shellcheck shell=bash
+# Put Aster's commands on PATH for this shell:  source bin/activate
+# Undo with:  deactivate_aster
+# This only sets PATH and ASTER_HOME; it never reads or exports secrets.
+
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    _aster_here="${BASH_SOURCE[0]}"
+else
+    # zsh
+    # shellcheck disable=SC2296
+    _aster_here="${(%):-%N}"
+fi
+ASTER_HOME="$(cd "$(dirname "$_aster_here")/.." && pwd)"
+export ASTER_HOME
+unset _aster_here
+
+if [[ -z "${_ASTER_OLD_PATH+set}" ]]; then
+    _ASTER_OLD_PATH="$PATH"
+    export PATH="$ASTER_HOME/bin:$PATH"
+fi
+
+deactivate_aster() {
+    if [[ -n "${_ASTER_OLD_PATH+set}" ]]; then
+        export PATH="$_ASTER_OLD_PATH"
+        unset _ASTER_OLD_PATH
+    fi
+    unset ASTER_HOME
+    unset -f deactivate_aster
+}
+
+echo "aster: commands on PATH (aster, aster-up, aster-down, aster-logs, aster-status," \
+    "aster-curl, aster-get, aster-set, aster-token, aster-backup, aster-restore, aster-update)." \
+    "deactivate_aster to undo." >&2
