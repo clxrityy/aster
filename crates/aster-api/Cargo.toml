@@ -8,6 +8,11 @@ rust-version.workspace = true
 name = "aster"
 path = "src/main.rs"
 
+[features]
+default = []
+# Self-trained byte-level neural engine (candle, CPU).
+neural = ["aster-runtime/neural"]
+
 [dependencies]
 anyhow.workspace = true
 aster-console.workspace = true

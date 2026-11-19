@@ -7,5 +7,7 @@ pub mod events;
 pub mod logs;
 
 pub use config::{AsterConfig, ConfigError, ConfigHandle};
-pub use engine::{ChatResult, LearnResult, Mode, Runtime, RuntimeError, RuntimeStatus};
+pub use engine::{
+    ChatResult, LearnResult, Mode, Runtime, RuntimeError, RuntimeStatus, TrainingStatus,
+};
 pub use events::{Envelope, Event};

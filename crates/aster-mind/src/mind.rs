@@ -155,6 +155,11 @@ impl StatisticalMind {
         &self.lexicon
     }
 
+    /// Learning updates so far (changes whenever what Aster knows changes).
+    pub fn updates(&self) -> u64 {
+        self.updates
+    }
+
     /// Version 1 stored answered meanings as replies to "what is X" and as
     /// recall documents, so the meaning came back whenever the word did. Move
     /// them into the lexicon.
@@ -412,17 +417,13 @@ impl StatisticalMind {
         self.caution = (self.caution + step).clamp(0.0, 1.0);
     }
 
-    fn lerp(min: f64, max: f64, position: f64) -> f64 {
-        min + (max - min) * position.clamp(0.0, 1.0)
-    }
-}
-
-impl Cognition for StatisticalMind {
-    fn engine(&self) -> &'static str {
-        ENGINE
-    }
-
-    fn respond(&mut self, context: &TurnContext<'_>) -> Response {
+    /// The full turn pipeline. `extra` may add one more scored candidate (the
+    /// neural engine's), given the owner's text and the current exploration.
+    pub(crate) fn respond_with(
+        &mut self,
+        context: &TurnContext<'_>,
+        extra: &mut dyn FnMut(&str, f64) -> Option<Candidate>,
+    ) -> Response {
         let params = context.params;
         let levels = context.levels;
         let toks = tokens(context.text);
@@ -585,6 +586,18 @@ impl Cognition for StatisticalMind {
             }
         }
 
+        if let Some(candidate) = extra(context.text, exploration) {
+            let duplicate = scored
+                .iter()
+                .any(|(c, _)| normalize(&c.text) == normalize(&candidate.text));
+            if duplicate {
+                notes.push("neural candidate repeated an existing one".into());
+            } else {
+                let text = candidate.text.clone();
+                scored.push((candidate, Chosen::Text(text)));
+            }
+        }
+
         scored.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
         scored.truncate(8);
         let has_direct = direct.is_some();
@@ -715,6 +728,20 @@ impl Cognition for StatisticalMind {
             question,
             events,
         }
+    }
+
+    fn lerp(min: f64, max: f64, position: f64) -> f64 {
+        min + (max - min) * position.clamp(0.0, 1.0)
+    }
+}
+
+impl Cognition for StatisticalMind {
+    fn engine(&self) -> &'static str {
+        ENGINE
+    }
+
+    fn respond(&mut self, context: &TurnContext<'_>) -> Response {
+        self.respond_with(context, &mut |_, _| None)
     }
 
     fn learn(&mut self, signal: LearningSignal, params: &CognitionParams) -> LearnOutcome {

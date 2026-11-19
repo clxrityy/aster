@@ -117,3 +117,51 @@ async fn idle_initiative_is_bounded_and_deduplicated(pool: PgPool) {
     assert!(runtime.decide(pending[0].id, true).await.is_err());
     runtime.shutdown().await;
 }
+
+#[cfg(feature = "neural")]
+#[sqlx::test(migrations = "../../migrations")]
+#[ignore = "requires disposable PostgreSQL; run with --include-ignored and DATABASE_URL"]
+async fn neural_engine_trains_on_ticks_survives_restart_and_switches_live(pool: PgPool) {
+    let store = Store::from_pool(pool);
+    store.initialize().await.unwrap();
+    let (config, _) = test_config("neural");
+    let mut neural = (*config.get()).clone();
+    neural.cognition.engine = "neural".into();
+    neural.cognition.neural.hidden = 64;
+    neural.cognition.neural.min_corpus_bytes = 16;
+    neural.cognition.neural.train_steps_per_tick = 20;
+    config.replace(neural.clone()).unwrap();
+    let runtime = Runtime::start(store.clone(), config.clone()).await.unwrap();
+    assert_eq!(runtime.status().await.engine, "neural");
+    runtime.teach("good morning", "Morning!").await.unwrap();
+    runtime.teach("thank you", "Any time.").await.unwrap();
+    for _ in 0..3 {
+        runtime.tick().await.unwrap();
+    }
+    let training = runtime.training().await;
+    assert_eq!(training.history.len(), 3);
+    assert_eq!(training.stats["neural_steps"], 60.0);
+
+    runtime.shutdown().await;
+    let restarted = Runtime::start(store.clone(), config.clone()).await.unwrap();
+    assert_eq!(restarted.training().await.stats["neural_steps"], 60.0);
+
+    // Switching the engine in config rebuilds the mind on the next tick.
+    let mut statistical = neural;
+    statistical.cognition.engine = "statistical".into();
+    config.replace(statistical).unwrap();
+    restarted.tick().await.unwrap();
+    assert_eq!(restarted.status().await.engine, "statistical");
+    assert_eq!(
+        restarted
+            .chat("thank you", Mode::Chat)
+            .await
+            .unwrap()
+            .aster
+            .text,
+        "Any time."
+    );
+    let latest = store.list_mind_snapshots(1).await.unwrap();
+    assert_eq!(latest[0].engine, "statistical");
+    restarted.shutdown().await;
+}

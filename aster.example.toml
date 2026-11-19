@@ -28,7 +28,7 @@ rest_minutes = 10                # length of an approved rest
 keep_snapshots = 50              # mind snapshots kept for rollback
 
 [cognition]
-engine = "statistical"           # self-developed; no external models
+engine = "statistical"           # or "neural" (needs a --features neural build); no external models
 ngram_order = 3
 max_reply_tokens = 40
 recall_top_k = 5
@@ -42,6 +42,24 @@ snapshot_every_updates = 20
 initiative_curiosity_min = 55.0  # curiosity needed before it asks on its own
 rest_energy_below = 25.0         # energy at which it requests rest
 starter_pack = true              # load built-in everyday words, replies, synonyms
+
+# The neural engine: everything "statistical" does, plus a byte-level network
+# trained in the background (on each tick) only on what you taught. It adds one
+# candidate per turn, scored against the rest. context/embed_dim/hidden shape
+# the network: changing them starts a new one.
+[cognition.neural]
+context = 32                     # bytes of history per prediction
+embed_dim = 24
+hidden = 256
+learning_rate = 0.003
+batch = 32
+train_steps_per_tick = 8         # 0 pauses training
+max_train_ms_per_tick = 200      # hard cap per tick
+min_corpus_bytes = 512           # wait until there is this much to learn from
+weight = 0.6                     # scales its candidate's score (0 = silent)
+temperature = 0.8
+top_k = 8
+max_reply_bytes = 160
 
 # Owner bounds for each level. Aster moves levels only inside min..=max.
 [regulation.levels]
@@ -67,7 +85,7 @@ rest              = { energy = 10.0, cognitive_load = -10.0, stress = -5.0 }
 
 [logs]
 dir = "data/logs"                # <dir>/<category>/YYYY-MM-DD.jsonl
-enabled = ["conversations", "thoughts", "levels", "memories", "requests", "config", "runtime"]
+enabled = ["conversations", "thoughts", "levels", "memories", "requests", "config", "runtime"]  # also "training"
 retention_days = 30              # 0 = keep forever
 
 [console]

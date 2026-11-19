@@ -46,6 +46,13 @@ pub enum Event {
         message: String,
         paused: bool,
     },
+    /// A background training slice finished (neural engine).
+    Trained {
+        steps: u32,
+        total_steps: u64,
+        loss: f32,
+        corpus_bytes: usize,
+    },
 }
 
 impl Event {
@@ -59,6 +66,7 @@ impl Event {
             Event::Memory { .. } => "memories",
             Event::ConfigChanged { .. } | Event::ConfigRejected { .. } => "config",
             Event::Runtime { .. } => "runtime",
+            Event::Trained { .. } => "training",
         }
     }
 }

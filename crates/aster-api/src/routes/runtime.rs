@@ -90,6 +90,7 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/mind/snapshots", get(snapshots).post(save_snapshot))
         .route("/v1/mind/rollback", post(rollback))
         .route("/v1/mind/corpus", get(corpus))
+        .route("/v1/mind/training", get(training))
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(guard.clone(), limits));
     // The event stream is long-lived: no timeout, but still requires a runtime.
@@ -449,6 +450,11 @@ async fn corpus(State(slot): State<RuntimeSlot>) -> Response {
         runtime.corpus().await,
     )
         .into_response()
+}
+
+async fn training(State(slot): State<RuntimeSlot>) -> Response {
+    let runtime = runtime!(slot);
+    Json(runtime.training().await).into_response()
 }
 
 fn sse(envelope: &Envelope) -> Option<SseEvent> {

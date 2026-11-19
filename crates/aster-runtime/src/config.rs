@@ -17,7 +17,19 @@ use tokio::sync::broadcast;
 
 use crate::events::{Envelope, Event};
 
-pub const LOG_CATEGORIES: [&str; 7] = [
+pub const LOG_CATEGORIES: [&str; 8] = [
+    "conversations",
+    "thoughts",
+    "levels",
+    "memories",
+    "requests",
+    "config",
+    "runtime",
+    "training",
+];
+
+/// Logged unless the owner opts out; "training" (one line per tick) is opt-in.
+const DEFAULT_LOGS: [&str; 7] = [
     "conversations",
     "thoughts",
     "levels",
@@ -119,7 +131,7 @@ impl Default for LogsSection {
     fn default() -> Self {
         Self {
             dir: "data/logs".into(),
-            enabled: LOG_CATEGORIES.iter().map(|c| c.to_string()).collect(),
+            enabled: DEFAULT_LOGS.iter().map(|c| c.to_string()).collect(),
             retention_days: 30,
         }
     }
@@ -265,6 +277,12 @@ impl AsterConfig {
         self.cognition
             .validate()
             .map_err(|e| ConfigError::Invalid(e.0))?;
+        if !aster_mind::available_engines().contains(&self.cognition.engine.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "cognition.engine {:?} is not in this build (rebuild with --features neural)",
+                self.cognition.engine
+            )));
+        }
         for category in &self.logs.enabled {
             if !LOG_CATEGORIES.contains(&category.as_str()) {
                 return Err(ConfigError::Invalid(format!(
@@ -410,6 +428,19 @@ impl ConfigHandle {
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Validate and install a whole config in memory, without touching the
+    /// file (embedding and tests). Returns the changed keys.
+    pub fn replace(&self, config: AsterConfig) -> Result<Vec<String>, ConfigError> {
+        config.validate()?;
+        let text = self
+            .inner
+            .last_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Ok(self.install(text, config))
     }
 
     pub fn get(&self) -> Arc<AsterConfig> {

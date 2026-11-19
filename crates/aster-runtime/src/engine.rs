@@ -80,6 +80,15 @@ pub struct LearnResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TrainingStatus {
+    pub engine: String,
+    /// Engines compiled into this build.
+    pub available: Vec<String>,
+    pub history: Vec<aster_core::TrainPoint>,
+    pub stats: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatus {
     pub engine: String,
     pub paused: bool,
@@ -104,7 +113,7 @@ pub struct Runtime {
     store: Store,
     config: ConfigHandle,
     bus: broadcast::Sender<Envelope>,
-    mind: tokio::sync::Mutex<Box<dyn Cognition>>,
+    mind: Arc<tokio::sync::Mutex<Box<dyn Cognition>>>,
     inner: Mutex<Inner>,
     stop: watch::Sender<bool>,
     log_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -147,7 +156,7 @@ impl Runtime {
             store,
             config: config.clone(),
             bus: bus.clone(),
-            mind: tokio::sync::Mutex::new(mind),
+            mind: Arc::new(tokio::sync::Mutex::new(mind)),
             inner: Mutex::new(Inner {
                 levels: levels.clone(),
                 persisted: levels,
@@ -730,6 +739,61 @@ impl Runtime {
         self.snapshot(&format!("rollback to v{version}")).await
     }
 
+    /// The engine's recent training curve (empty for untrained engines).
+    pub async fn training(&self) -> TrainingStatus {
+        let mind = self.mind.lock().await;
+        TrainingStatus {
+            engine: mind.engine().to_string(),
+            available: aster_mind::available_engines()
+                .iter()
+                .map(|e| e.to_string())
+                .collect(),
+            history: mind.training_history(),
+            stats: mind.stats(),
+        }
+    }
+
+    /// Rebuild the mind when `cognition.engine` changed: snapshot what Aster
+    /// knows, then restore it into the configured engine.
+    async fn follow_engine(&self) -> Result<(), RuntimeError> {
+        let params = self.config.get().cognition.clone();
+        let from = {
+            let mut mind = self.mind.lock().await;
+            if mind.engine() == params.engine {
+                return Ok(());
+            }
+            let bytes = mind.snapshot().map_err(|_| RuntimeError::Snapshot)?;
+            let rebuilt =
+                aster_mind::build(&params, Some(&bytes)).map_err(|_| RuntimeError::Snapshot)?;
+            std::mem::replace(&mut *mind, rebuilt).engine()
+        };
+        self.emit(Event::Runtime {
+            message: format!("cognition engine switched from {from} to {}", params.engine),
+            paused: self.config.get().runtime.paused,
+        });
+        self.snapshot(&format!("engine switched to {}", params.engine))
+            .await?;
+        Ok(())
+    }
+
+    /// One bounded background training slice on a blocking thread.
+    async fn train(&self) {
+        let params = self.config.get().cognition.clone();
+        let budget = Duration::from_millis(params.neural.max_train_ms_per_tick);
+        let mut mind = self.mind.clone().lock_owned().await;
+        let report = tokio::task::spawn_blocking(move || mind.train(&params, budget)).await;
+        match report {
+            Ok(Some(report)) if report.steps > 0 => self.emit(Event::Trained {
+                steps: report.steps,
+                total_steps: report.total_steps,
+                loss: report.loss,
+                corpus_bytes: report.corpus_bytes,
+            }),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "training task failed"),
+        }
+    }
+
     // ----- ticking ------------------------------------------------------
 
     fn spawn_ticker(self: Arc<Self>) {
@@ -785,6 +849,10 @@ impl Runtime {
         if changed {
             self.persist_levels(if resting { "rest" } else { "decay" })
                 .await?;
+        }
+        self.follow_engine().await?;
+        if !resting {
+            self.train().await;
         }
         if resting || idle < Duration::from_secs(cfg.runtime.idle_before_initiative_secs) {
             return Ok(());
