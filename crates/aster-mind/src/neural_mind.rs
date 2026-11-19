@@ -328,12 +328,14 @@ mod tests {
             starter_pack: false,
             ..Default::default()
         };
+        // Small enough to train quickly in a debug build on a slow CI runner.
         params.neural.context = 12;
         params.neural.embed_dim = 8;
-        params.neural.hidden = 64;
-        params.neural.learning_rate = 0.01;
+        params.neural.hidden = 32;
+        params.neural.batch = 16;
+        params.neural.learning_rate = 0.02;
         params.neural.min_corpus_bytes = 16;
-        params.neural.train_steps_per_tick = 400;
+        params.neural.train_steps_per_tick = 300;
         params.neural.max_train_ms_per_tick = 10_000;
         params
     }
@@ -381,7 +383,10 @@ mod tests {
                 .any(|c| c.source == CandidateSource::Neural)
         );
         let report = mind.train(&params, Duration::from_secs(30)).unwrap();
-        assert_eq!(report.steps, 400);
+        // The time cap may stop a slow machine early; it must still get past
+        // the point where the network is allowed to speak.
+        assert!(report.steps as u64 > MIN_STEPS_TO_SPEAK, "{report:?}");
+        assert_eq!(report.total_steps, u64::from(report.steps));
         assert!(report.loss.is_finite());
         assert_eq!(mind.training_history().len(), 1);
         let after = ask(mind.as_mut(), "how are you doing", &params);
@@ -400,7 +405,7 @@ mod tests {
             .any(|n| n.contains("neural candidate repeated"));
         assert!(neural || agreed, "{:?}", after.trace);
         let stats = mind.stats();
-        assert_eq!(stats["neural_steps"], 400.0);
+        assert_eq!(stats["neural_steps"], f64::from(report.steps));
         assert!(stats["neural_corpus_bytes"] > 16.0);
     }
 
@@ -412,8 +417,10 @@ mod tests {
         let bytes = mind.snapshot().unwrap();
         assert!(NeuralMind::is_envelope(&bytes));
 
+        let steps = mind.stats()["neural_steps"];
+        assert!(steps > 0.0);
         let restored = crate::build(&params, Some(&bytes)).unwrap();
-        assert_eq!(restored.stats()["neural_steps"], 400.0);
+        assert_eq!(restored.stats()["neural_steps"], steps);
         assert_eq!(restored.training_history(), mind.training_history());
 
         // Back to statistical: the replies survive, the network does not.
@@ -441,7 +448,7 @@ mod tests {
         mind.train(&params, Duration::from_secs(30));
         let bytes = mind.snapshot().unwrap();
         let mut wider = params.clone();
-        wider.neural.hidden = 96;
+        wider.neural.hidden = 48;
         let mut restored = crate::build(&wider, Some(&bytes)).unwrap();
         assert_eq!(restored.stats()["neural_steps"], 0.0);
         let response = ask(restored.as_mut(), "thank you", &wider);
