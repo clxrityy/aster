@@ -101,7 +101,7 @@ impl Store {
     }
 }
 
-async fn memory_identity(connection: &mut PgConnection) -> Result<Uuid, StorageError> {
+pub(crate) async fn memory_identity(connection: &mut PgConnection) -> Result<Uuid, StorageError> {
     // Never accept an identity UUID from a request or mutate an incomplete
     // foundation. A shared row lock keeps the identity key stable until commit;
     // database administrators remain an explicit trust boundary.

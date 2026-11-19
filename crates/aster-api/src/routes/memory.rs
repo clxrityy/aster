@@ -15,13 +15,13 @@ use axum::{
 };
 use serde::Deserialize;
 
-use super::unavailable;
+use super::{AppState, RuntimeSlot, unavailable};
 
 // JSON escapes may take six wire bytes per content byte. Bound raw bodies too,
 // while still accepting maximally escaped input within the domain text limits.
 const MAX_BODY_BYTES: usize = 128 * 1024;
 
-pub(super) fn router() -> Router<Store> {
+pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/memories", get(list).post(create))
         .route("/v1/memories/{id}", delete(remove))
@@ -30,6 +30,7 @@ pub(super) fn router() -> Router<Store> {
 
 async fn create(
     State(store): State<Store>,
+    State(runtime): State<RuntimeSlot>,
     input: Result<Json<MemoryDraft>, JsonRejection>,
 ) -> Response {
     let draft = match input {
@@ -47,7 +48,12 @@ async fn create(
         }
     };
     match store.create_memory(draft).await {
-        Ok(memory) => (StatusCode::CREATED, Json(memory)).into_response(),
+        Ok(memory) => {
+            if let Some(runtime) = runtime.0 {
+                runtime.memory_created(&memory).await;
+            }
+            (StatusCode::CREATED, Json(memory)).into_response()
+        }
         Err(error) => storage_failure(error),
     }
 }
@@ -87,7 +93,11 @@ async fn list(
     }
 }
 
-async fn remove(State(store): State<Store>, path: Result<Path<String>, PathRejection>) -> Response {
+async fn remove(
+    State(store): State<Store>,
+    State(runtime): State<RuntimeSlot>,
+    path: Result<Path<String>, PathRejection>,
+) -> Response {
     let id = match path {
         Ok(Path(value)) => match value.parse::<MemoryId>() {
             Ok(id) => id,
@@ -96,7 +106,12 @@ async fn remove(State(store): State<Store>, path: Result<Path<String>, PathRejec
         Err(_) => return failure(StatusCode::BAD_REQUEST, "invalid_memory_id"),
     };
     match store.delete_memory(id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            if let Some(runtime) = runtime.0 {
+                runtime.memory_deleted(id.get()).await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => failure(StatusCode::NOT_FOUND, "memory_not_found"),
         Err(error) => storage_failure(error),
     }

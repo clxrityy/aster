@@ -10,22 +10,26 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+aster-console.workspace = true
 aster-core.workspace = true
+aster-runtime.workspace = true
 aster-storage.workspace = true
 axum.workspace = true
 clap.workspace = true
 dotenvy.workspace = true
+http-body-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-http-body-util.workspace = true
 sqlx.workspace = true
 tower.workspace = true

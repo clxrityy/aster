@@ -1,8 +1,8 @@
-//! Private operational interface for Aster's Phase 1 foundation.
+//! Private owner interface: inspection, memory, and the live runtime.
 
 pub mod auth;
 pub mod config;
 pub mod routes;
 pub mod server;
 
-pub use routes::router;
+pub use routes::{router, router_with_runtime};

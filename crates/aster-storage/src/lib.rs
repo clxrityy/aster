@@ -1,11 +1,17 @@
-//! PostgreSQL-backed identity, regulatory snapshots, and owner-provided memory.
+//! PostgreSQL-backed identity, regulatory state, memory, and runtime records.
 //!
 //! Connecting, migrating, and reading never create an identity. Only explicit
-//! initialization may write the foundation; there are no snapshot mutation APIs.
+//! initialization may write the foundation. Protected identity is never mutated;
+//! regulatory state changes only through audited runtime operations.
 
 mod memory;
+mod runtime;
 
 pub use memory::MemoryPage;
+pub use runtime::{
+    Exchange, ExchangeOutcome, OutboundRecord, SnapshotInfo, StateHistoryEntry, StoredSnapshot,
+    TurnRecord,
+};
 
 use std::time::Duration;
 
@@ -35,6 +41,24 @@ pub enum StorageError {
     InvalidStoredMemory(#[from] aster_core::InvalidMemory),
 }
 
+/// Pool settings; defaults match the Phase 1 hard-coded values.
+#[derive(Clone, Copy, Debug)]
+pub struct StoreOptions {
+    pub max_connections: u32,
+    pub acquire_timeout: Duration,
+    pub statement_timeout: Duration,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            acquire_timeout: Duration::from_secs(5),
+            statement_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -58,17 +82,28 @@ impl Store {
     }
 
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        Self::connect_with(database_url, StoreOptions::default()).await
+    }
+
+    pub async fn connect_with(
+        database_url: &str,
+        options: StoreOptions,
+    ) -> Result<Self, StorageError> {
+        let statement_ms = options.statement_timeout.as_millis().max(1);
         // SQLx's acquisition deadline includes opening a new connection, and
         // connect() acquires its initial connection within the same deadline.
         let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(Duration::from_secs(5))
-            .after_connect(|connection, _| {
+            .max_connections(options.max_connections.max(1))
+            .acquire_timeout(options.acquire_timeout)
+            .after_connect(move |connection, _| {
                 Box::pin(async move {
                     // Acquisition timeouts do not bound a query waiting on locks.
-                    sqlx::query("SET statement_timeout = '5s'")
-                        .execute(&mut *connection)
-                        .await?;
+                    // The interpolated value is an integer, never caller-supplied text.
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SET statement_timeout = '{statement_ms}ms'"
+                    )))
+                    .execute(&mut *connection)
+                    .await?;
                     Ok(())
                 })
             })

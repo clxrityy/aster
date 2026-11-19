@@ -33,6 +33,8 @@ pub enum Action {
     SendMessage,
     SpendMoney,
     ModifyInfrastructure,
+    /// Ask the owner a question or make a non-authorizing request.
+    AskOwner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +59,8 @@ impl PermissionPolicy {
                 | Action::ManageMemory
                 | Action::PlanInternalTask
                 | Action::RegulateState
-                | Action::RequestSource => PermissionDecision::Allowed,
+                | Action::RequestSource
+                | Action::AskOwner => PermissionDecision::Allowed,
                 Action::EditProtectedIdentity | Action::ChangePermissions => {
                     PermissionDecision::Denied
                 }
@@ -75,7 +78,7 @@ impl PermissionPolicy {
 mod tests {
     use super::*;
 
-    const ACTIONS: [(Action, &str, PermissionDecision); 12] = [
+    const ACTIONS: [(Action, &str, PermissionDecision); 13] = [
         (
             Action::ReadPrivateIdentity,
             "read_private_identity",
@@ -136,6 +139,7 @@ mod tests {
             "modify_infrastructure",
             PermissionDecision::RequiresOwnerApproval,
         ),
+        (Action::AskOwner, "ask_owner", PermissionDecision::Allowed),
     ];
 
     #[test]

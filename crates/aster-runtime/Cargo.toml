@@ -1,0 +1,24 @@
+[package]
+name = "aster-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+aster-core.workspace = true
+aster-mind.workspace = true
+aster-storage.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "test-util"] }
+sqlx.workspace = true
