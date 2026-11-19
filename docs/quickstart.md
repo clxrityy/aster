@@ -24,17 +24,21 @@ data/logs/        JSONL logs
 data/ingest/      files for /ingest
 ```
 
-Console (on the host):
+Open the dashboard at http://127.0.0.1:3000 and sign in with your `ASTER_OWNER_TOKEN` ([dashboard](dashboard.md)).
+
+Or the terminal console:
 
 ```bash
-cargo build --release -p aster-api
-./target/release/aster console
+source bin/activate
+aster console          # runs inside the container
 ```
 
 ```bash
-podman-compose logs -f aster   # server output
-podman-compose down            # stop; keeps the database volume
+aster-logs             # server output   (podman-compose logs -f aster)
+aster-down             # stop; keeps the database volume
 ```
+
+All helpers: [commands](commands.md). For a VPS behind Cloudflare: [deploy](deploy.md).
 
 Never use `down -v` unless you want to erase Aster's database.
 
@@ -47,6 +51,6 @@ Requires PostgreSQL and `DATABASE_URL` in `.env`.
 ./target/release/aster serve
 ```
 
-Then type `hello` in the console. Aster knows nothing yet, so it will ask. See [training](training.md).
+Then type `hello` on the dashboard or in the console. Aster knows nothing yet, so it will ask. See [training](training.md).
 
 ← [docs](README.md)
