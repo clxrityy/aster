@@ -1,0 +1,78 @@
+# Aster live configuration. Copy to aster.toml; every key is optional.
+# Edits are picked up within ~1s while `aster serve` runs. An invalid edit is
+# rejected and the previous configuration stays active. Secrets stay in .env.
+# Values shown are the defaults.
+
+[server]
+body_limit_bytes = 131072        # max request body for runtime routes
+request_timeout_ms = 15000       # per-request timeout (not the event stream)
+rate_limit_per_minute = 240      # owner API requests/min on runtime routes; 0 = off
+shutdown_drain_ms = 5000         # HTTP drain time on Ctrl-C
+ingest_dir = "data/ingest"       # /ingest may only read files inside here
+ingest_max_bytes = 4194304
+
+[database]                       # restart required
+pool_size = 5
+acquire_timeout_ms = 5000
+statement_timeout_ms = 5000
+
+[runtime]
+tick_interval_ms = 5000          # regulation/initiative step
+paused = false                   # freeze levels and initiative (/pause, /resume)
+idle_before_initiative_secs = 120
+max_pending_outbound = 5         # unanswered questions/requests at once
+max_outbound_per_hour = 6
+outbound_expiry_hours = 72
+persist_level_epsilon = 0.5      # min level change before decay is saved
+rest_minutes = 10                # length of an approved rest
+keep_snapshots = 50              # mind snapshots kept for rollback
+
+[cognition]
+engine = "statistical"           # self-developed; no external models
+ngram_order = 3
+max_reply_tokens = 40
+recall_top_k = 5
+learning_rate = 0.25
+exploration_min = 0.02           # bounds Aster self-regulates exploration within
+exploration_max = 0.4
+answer_confidence_min = 0.15     # bounds for its confidence threshold to reply
+answer_confidence_max = 0.6
+snapshot_every_updates = 20
+# rng_seed = 42                  # set for reproducible training sessions
+initiative_curiosity_min = 55.0  # curiosity needed before it asks on its own
+rest_energy_below = 25.0         # energy at which it requests rest
+starter_pack = true              # load built-in everyday words, replies, synonyms
+
+# Owner bounds for each level. Aster moves levels only inside min..=max.
+[regulation.levels]
+energy         = { baseline = 75.0, decay_per_min = 0.02, min = 0.0, max = 100.0 }
+focus          = { baseline = 70.0, decay_per_min = 0.05, min = 0.0, max = 100.0 }
+cognitive_load = { baseline = 10.0, decay_per_min = 0.1, min = 0.0, max = 100.0 }
+curiosity      = { baseline = 60.0, decay_per_min = 0.03, min = 0.0, max = 100.0 }
+stimulation    = { baseline = 40.0, decay_per_min = 0.05, min = 0.0, max = 100.0 }
+stress         = { baseline = 10.0, decay_per_min = 0.08, min = 0.0, max = 100.0 }
+confidence     = { baseline = 50.0, decay_per_min = 0.01, min = 0.0, max = 100.0 }
+
+# Level deltas per event.
+[regulation.events]
+message_received  = { cognitive_load = 4.0, stimulation = 5.0, energy = -0.5 }
+reply_sent        = { energy = -0.5, focus = 1.0 }
+positive_feedback = { confidence = 3.0, stress = -2.0 }
+negative_feedback = { confidence = -3.0, stress = 3.0, curiosity = 1.0 }
+unknown_concept   = { curiosity = 4.0, cognitive_load = 2.0 }
+taught            = { confidence = 1.5, cognitive_load = 2.0 }
+question_answered = { curiosity = -3.0, confidence = 2.0 }
+ingested          = { cognitive_load = 8.0, energy = -3.0, curiosity = 2.0 }
+rest              = { energy = 10.0, cognitive_load = -10.0, stress = -5.0 }
+
+[logs]
+dir = "data/logs"                # <dir>/<category>/YYYY-MM-DD.jsonl
+enabled = ["conversations", "thoughts", "levels", "memories", "requests", "config", "runtime"]
+retention_days = 30              # 0 = keep forever
+
+[console]
+server_url = "http://127.0.0.1:3000"
+refresh_ms = 100
+show_trace = true
+training_prompt_after_reply = true
+history_turns = 50

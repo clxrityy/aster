@@ -1,0 +1,18 @@
+[package]
+name = "aster-mind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Experimental tiny neural language model (not used by the runtime yet).
+neural = ["dep:candle-core", "dep:candle-nn"]
+
+[dependencies]
+aster-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }

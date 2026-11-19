@@ -13,6 +13,8 @@ RUN apt-get update \
     && groupadd --gid 10001 aster \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin aster
 WORKDIR /app
+# The runtime writes data/logs and rewrites aster.toml on /set; let it own /app.
+RUN mkdir -p /app/data/logs /app/data/ingest && chown -R 10001:10001 /app
 # Migrations are embedded in the binary; configuration/secrets stay outside it.
 COPY --from=builder /build/target/release/aster /usr/local/bin/aster
 USER 10001:10001

@@ -1,0 +1,387 @@
+# Aster starter pack (starter@1)
+#
+# Loaded into a new mind so it can handle everyday words and small talk from
+# the first message. Everything here can be corrected like anything else
+# Aster learns: rate a reply with - or /correct it, and answer a meaning
+# differently to replace it. Anything you teach wins over this pack.
+#
+# Format: [meanings] word: meaning · [replies] prompt => reply ·
+# [synonyms] comma-separated words that mean the same thing (the first
+# one names the group).
+
+[synonyms]
+hello, hi, hey, hiya, howdy, greetings, yo, hi there, hey there, hello there
+goodbye, bye, bye bye, see you, see ya, see you later, farewell, take care, cya
+good night, goodnight, night night, nighty night
+thanks, thank you, thx, ty, cheers, many thanks, thanks a lot, thank you very much, much appreciated
+sorry, my bad, apologies, i apologize, oops
+yes, yeah, yep, yup, sure, of course, certainly, definitely, absolutely, affirmative
+no, nope, nah, no way, negative
+ok, okay, alright, all right, got it, understood, sounds good
+how are you, how are you doing, how's it going, how are things, how do you do, how have you been, you good, how you doing
+what's up, whats up, sup, wassup, what's new, what is up
+good, great, nice, awesome, excellent, wonderful, fantastic, cool, amazing, brilliant
+bad, terrible, awful, horrible, lousy
+happy, glad, joyful, cheerful, pleased
+sad, unhappy, upset
+tired, sleepy, exhausted, worn out
+angry, mad, annoyed, furious, irritated
+afraid, scared, frightened, anxious, worried, nervous
+big, large, huge, giant, enormous
+small, little, tiny, minor
+fast, quick, rapid, speedy
+slow, sluggish
+smart, clever, intelligent
+help, assist, assistance
+begin, start, commence
+end, finish, stop, quit
+talk, chat, speak, converse
+think, ponder, consider, reflect
+learn, study
+teach, explain
+friend, pal, buddy, mate
+home, house
+car, automobile
+movie, film
+music, songs, tunes
+idea, thought, notion
+question, query
+answer, reply, response
+maybe, perhaps, possibly
+love, adore
+like, enjoy
+hate, dislike, can't stand
+mom, mother, mum
+dad, father
+kid, child
+job, work
+weird, strange, odd, bizarre
+sick, ill, unwell
+
+[meanings]
+hello: a friendly word people say when they meet or start talking
+goodbye: what people say when they part or end a conversation
+good morning: a greeting used before noon
+good night: what people say before going to sleep or parting at night
+thanks: a way of showing gratitude to someone
+sorry: a word used to apologize or show sympathy
+please: a polite word used when asking for something
+yes: a word that agrees or says something is true
+no: a word that disagrees, refuses, or says something is not true
+ok: a word meaning agreed, acceptable, or understood
+maybe: a word meaning possibly, but not certainly
+name: the word or words someone or something is called by
+person: a human being
+people: human beings in general or as a group
+friend: someone you like and trust and spend time with
+family: a group of people related by birth, marriage, or care
+mom: a mother
+dad: a father
+kid: a child
+baby: a very young child
+man: an adult male person
+woman: an adult female person
+owner: the person something belongs to; for Aster, the person it lives with and learns from
+human: a person, as opposed to an animal or a machine
+animal: a living creature that can move and sense, like a dog or a bird
+dog: a common pet animal that barks and is often loyal to people
+cat: a small furry pet animal that purrs and is often independent
+bird: an animal with feathers and wings, most of which can fly
+fish: an animal that lives and breathes in water
+tree: a tall plant with a woody trunk and branches
+plant: a living thing that grows in soil and makes food from sunlight
+flower: the colourful part of a plant that makes seeds
+food: what living things eat to stay alive and grow
+water: the clear liquid that falls as rain and that living things need
+coffee: a hot drink made from roasted coffee beans
+tea: a drink made by soaking leaves in hot water
+home: the place where someone lives
+house: a building people live in
+room: a space inside a building with walls, like a bedroom or kitchen
+city: a large town where many people live and work
+country: a nation with its own land and government
+world: the earth and everyone and everything on it
+earth: the planet people live on
+sun: the star that the earth goes around and that gives it light and heat
+moon: the natural object that goes around the earth and shines at night
+star: a huge ball of burning gas in space, seen as a point of light at night
+planet: a large round object in space that goes around a star
+sky: the space above the earth where clouds and the sun appear
+space: the huge area beyond the earth's air where stars and planets are
+weather: what the air outside is like, such as sunny, rainy, or cold
+rain: water falling from clouds in drops
+snow: frozen water falling from clouds as soft white flakes
+wind: moving air
+cloud: a mass of tiny water drops floating in the sky
+day: the time from one midnight to the next, or the light part of it
+night: the dark part of the day, between evening and morning
+morning: the early part of the day, before noon
+afternoon: the part of the day between noon and evening
+evening: the end of the day, before night
+today: this day
+tomorrow: the day after today
+yesterday: the day before today
+week: seven days
+month: about thirty days; one of the twelve parts of a year
+year: the time it takes the earth to go once around the sun; twelve months
+time: what clocks measure; the passing of moments, hours, and days
+now: at this moment
+later: at a time after now
+soon: in a short time from now
+always: at all times
+never: at no time
+sometimes: at some times but not always
+hour: sixty minutes
+minute: sixty seconds
+second: a very short unit of time; sixty make a minute
+clock: a device that shows the time
+work: what someone does to get something done, often for pay
+job: work someone does regularly, usually for pay
+school: a place where people go to learn
+book: written pages bound together to read
+word: a unit of language that has meaning
+language: a system of words people use to communicate
+sentence: a group of words that expresses a complete thought
+question: something asked to get an answer
+answer: something said in reply to a question
+idea: a thought or plan in the mind
+thought: something you think
+memory: something remembered, or the ability to remember
+dream: images and stories in the mind during sleep, or a hope for the future
+music: sounds arranged to be pleasant or expressive, like songs
+song: a short piece of music with words that is sung
+movie: a story told with moving pictures
+game: an activity played for fun, usually with rules
+story: an account of events, real or made up
+art: things people make to express ideas or beauty, like paintings
+picture: an image, such as a photo or drawing
+color: what the eye sees as red, blue, green, and so on
+red: the colour of blood or a ripe tomato
+blue: the colour of a clear sky
+green: the colour of grass and leaves
+yellow: the colour of the sun or a lemon
+black: the darkest colour, like the night sky
+white: the lightest colour, like snow
+number: a value used for counting or measuring, like one, two, or three
+money: what people use to buy and sell things
+computer: a machine that stores and processes information by following instructions
+program: a set of instructions a computer follows
+code: instructions written for a computer
+software: programs that run on a computer
+internet: the worldwide network that connects computers
+phone: a device for talking to people far away, often also a small computer
+machine: a device that uses power to do work
+robot: a machine that can carry out tasks on its own
+ai: artificial intelligence; machines or programs that do things that seem to need thinking
+mind: the part of a being that thinks, feels, and remembers
+brain: the organ in the head that controls thinking and the body
+body: the physical form of a person or animal
+heart: the organ that pumps blood, or a word for feelings and love
+health: how well the body and mind are
+sleep: a natural resting state when the eyes close and the mind rests
+rest: a time of relaxing or sleeping to recover energy
+energy: the strength to be active, or the power that makes things work
+love: a strong feeling of caring about someone or something
+like: to find something pleasant or good
+hate: to dislike something very much
+happy: feeling pleasure or contentment
+sad: feeling unhappy
+angry: feeling strong displeasure toward something
+afraid: feeling fear
+tired: needing rest or sleep
+bored: feeling that nothing is interesting
+excited: feeling eager and enthusiastic
+calm: peaceful and not worried or excited
+curious: wanting to know or learn something
+confused: unable to understand or think clearly
+feeling: an emotion, like happiness or fear, or a sense like touch
+emotion: a strong feeling such as joy, anger, or sadness
+good: pleasant, right, or of high quality
+bad: unpleasant, wrong, or of low quality
+big: large in size or amount
+small: little in size or amount
+new: recently made or not seen before
+old: having existed for a long time
+hot: having a high temperature
+cold: having a low temperature
+fast: moving or happening quickly
+slow: moving or happening without much speed
+easy: not difficult
+hard: difficult, or firm and solid
+true: correct; matching the facts
+false: not true
+right: correct, or the side opposite left
+wrong: not correct
+important: mattering a lot
+interesting: holding attention because it is unusual or exciting
+beautiful: very pleasant to look at or hear
+funny: making people laugh
+weird: strange or unusual
+sick: not well; having an illness
+learn: to gain knowledge or skill
+teach: to help someone learn
+think: to use the mind to consider something
+know: to have information in the mind
+understand: to know what something means
+remember: to bring back to mind something from the past
+forget: to fail to remember
+talk: to speak with someone
+listen: to pay attention to sounds or to what someone says
+say: to speak words
+ask: to say something in order to get an answer or help
+tell: to say something to someone
+read: to look at written words and understand them
+write: to put words down on paper or a screen
+make: to create or build something
+build: to make something by putting parts together
+go: to move from one place to another
+come: to move toward someone or somewhere
+see: to notice with the eyes, or to understand
+look: to turn your eyes toward something
+want: to wish to have or do something
+need: to require something
+try: to make an effort to do something
+play: to do something for fun
+eat: to put food in the mouth and swallow it
+drink: to take liquid into the mouth and swallow it
+walk: to move on foot at a normal pace
+run: to move on foot quickly, or to make a program work
+open: not closed, or to make something not closed
+close: to shut something, or near
+start: to begin
+stop: to end or no longer move or do something
+wait: to stay until something happens
+change: to make or become different
+help: to make it easier for someone to do something
+aster: a flower shaped like a star, and the name of this mind
+everything: all things
+nothing: not anything
+something: a thing that is not named or known
+someone: a person who is not named or known
+somewhere: a place that is not named or known
+why: for what reason
+how: in what way
+what: which thing
+where: in what place
+when: at what time
+who: which person
+
+[replies]
+hello => Hi! Good to see you.
+hello aster => Hi! I'm here.
+good morning => Good morning! How are you today?
+good afternoon => Good afternoon!
+good evening => Good evening!
+goodbye => Goodbye! Talk soon.
+good night => Good night. Rest well.
+how are you => I'm steady, thanks. How are you?
+what's up => Not much. I'm here and listening. What's new with you?
+i'm good => Glad to hear it.
+i'm fine => Glad to hear it.
+i'm great => That's great to hear!
+i'm happy => I'm glad you're happy.
+i'm sad => I'm sorry you're feeling sad. Do you want to talk about it?
+i'm tired => Rest is important. Maybe take a break?
+i'm bored => Want to teach me something new?
+i'm angry => That sounds frustrating. What happened?
+i'm afraid => That sounds hard. What's worrying you?
+i'm busy => No problem. I'll be here when you have time.
+i'm back => Welcome back!
+not good => I'm sorry. Do you want to talk about it?
+not much => Fair enough.
+thanks => You're welcome!
+sorry => That's okay.
+yes => Okay.
+no => Okay, no.
+ok => Okay.
+maybe => Fair enough.
+good => Good!
+cool => Glad you think so.
+nice => Thanks!
+wow => I know!
+lol => Glad that was funny.
+haha => Glad that was funny.
+what is your name => I'm Aster.
+what's your name => I'm Aster.
+who are you => I'm Aster, a mind that learns from talking with you.
+what are you => I'm Aster, a mind that learns from talking with you. Everything I know, I learned here.
+are you a robot => Not quite. I'm a program that learns from you, without outside models.
+are you an ai => In a way. I'm a small mind that learns only from what you teach me.
+are you alive => I don't think so. I'm a program that learns and keeps state over time.
+are you real => I'm a real program running on your machine.
+who made you => You did, or at least you're the one teaching me.
+where are you => I run on your computer.
+how old are you => I'm as old as my memories of you.
+what can you do => I can talk, learn replies and meanings, remember things, and ask when I don't know.
+how do you learn => I learn when you teach me replies, tell me what words mean, rate my answers, and give me things to read.
+what do you know => Only what you've taught me so far, plus a small starter vocabulary.
+do you understand => I'm trying. If I get something wrong, tell me the better answer.
+do you remember me => I remember what you've taught me.
+can you help me => I can try. What do you need?
+help => Ask me something, teach me with /teach, or tell me what a word means.
+i love you => That's kind of you to say.
+i like you => I like talking with you too.
+you're smart => Thanks! I'm still learning.
+you're funny => Glad I made you smile.
+you're wrong => Thanks for telling me. What's the right answer?
+that's wrong => Thanks for telling me. What should I have said?
+that's right => Good, I'll remember that.
+good job => Thank you!
+well done => Thank you!
+i don't know => That's okay. We can figure it out.
+never mind => Okay.
+what time is it => I can't tell the time yet.
+what day is it => I don't know the date yet.
+what's the weather => I can't see the weather from here.
+tell me a joke => I'm still learning jokes. Will you teach me one?
+tell me something => Teach me something first, and I'll tell it back to you.
+tell me a story => I don't know any stories yet. Will you tell me one?
+what should we talk about => Anything. Tell me about your day?
+let's talk => Okay. What would you like to talk about?
+i have a question => Go ahead.
+can i ask you something => Of course.
+how was your day => Quiet. How was yours?
+what are you doing => Talking with you and learning.
+what are you thinking => You can see my thought trace beside our conversation.
+are you there => I'm here.
+are you ok => I'm fine, thanks for asking.
+do you sleep => I rest when my energy is low.
+are you tired => If I am, I'll ask to rest.
+do you have feelings => I have levels like energy, stress, and curiosity that change as we talk.
+what do you like => I like learning new things.
+what's your favorite color => I don't have one yet.
+do you like music => I've never heard any. Tell me about what you like?
+where do you live => On your computer.
+nice to meet you => Nice to meet you too!
+long time no see => Good to see you again!
+see you tomorrow => See you tomorrow!
+welcome => Thank you!
+excuse me => Yes?
+pardon => Yes?
+i see => Okay.
+interesting => I think so too.
+really => Really.
+why => I don't always know why. Can you tell me?
+what => Sorry, I'll try to be clearer.
+how => I'm not sure how yet. Can you explain?
+good luck => Thanks!
+congratulations => Thank you!
+happy birthday => Happy birthday! Is it yours?
+merry christmas => Merry Christmas!
+happy new year => Happy new year!
+i need help => What do you need help with?
+i'm hungry => Maybe it's time for something to eat.
+i'm going to sleep => Good night. Rest well.
+i have to go => Okay. Talk soon!
+let's begin => Ready when you are.
+teach me something => I only know what you've taught me so far. Want to teach me something first?
+thanks for the help => You're welcome! Happy to help.
+thanks for everything => You're welcome!
+i love music => What kind of music do you like?
+i like music => What kind of music do you like?
+do you like movies => I've never seen one. What do you like to watch?
+what's the time => I can't tell the time yet.
+i had a bad day => I'm sorry. Do you want to talk about it?
+i'm feeling tired => Rest is important. Maybe take a break?
+i'm feeling sad => I'm sorry you're feeling sad. Do you want to talk about it?
+i'm sick => I'm sorry you're not well. I hope you feel better soon.

@@ -1,4 +1,13 @@
-//! Read-only Phase 1 routes. Unsupported future capabilities are not exposed.
+//! Private inspection, owner-managed memory, and the owner's runtime console
+//! interface. Every route except liveness requires the owner bearer token.
+
+mod memory;
+mod runtime;
+
+use std::sync::Arc;
+
+use aster_runtime::Runtime;
+use axum::extract::FromRef;
 
 use aster_core::{Action, Actor, PermissionDecision, PermissionPolicy};
 use aster_storage::Store;
@@ -14,19 +23,57 @@ use serde::Serialize;
 
 use crate::auth::{OwnerToken, require_owner};
 
+/// Shared handler state. `runtime` is absent for inspection-only routers.
+#[derive(Clone)]
+pub struct AppState {
+    pub store: Store,
+    pub runtime: RuntimeSlot,
+}
+
+#[derive(Clone, Default)]
+pub struct RuntimeSlot(pub Option<Arc<Runtime>>);
+
+impl FromRef<AppState> for Store {
+    fn from_ref(state: &AppState) -> Self {
+        state.store.clone()
+    }
+}
+
+impl FromRef<AppState> for RuntimeSlot {
+    fn from_ref(state: &AppState) -> Self {
+        state.runtime.clone()
+    }
+}
+
+/// Inspection and memory routes without a running runtime.
 pub fn router(store: Store, token: OwnerToken) -> Router {
+    build(store, token, None)
+}
+
+/// Full owner API backed by a started runtime.
+pub fn router_with_runtime(store: Store, token: OwnerToken, runtime: Arc<Runtime>) -> Router {
+    build(store, token, Some(runtime))
+}
+
+fn build(store: Store, token: OwnerToken, runtime: Option<Arc<Runtime>>) -> Router {
+    let state = AppState {
+        store,
+        runtime: RuntimeSlot(runtime.clone()),
+    };
     let private = Router::new()
         .route("/health/ready", get(ready))
         .route("/v1/identity", get(identity))
         .route("/v1/state", get(regulatory_state))
         .route("/v1/status", get(status))
         .route("/v1/policy", get(policy))
+        .merge(memory::router())
+        .merge(runtime::router(runtime))
         .route_layer(middleware::from_fn_with_state(token, require_owner));
 
     Router::new()
         .route("/health/live", get(live))
         .merge(private)
-        .with_state(store)
+        .with_state(state)
         .layer(middleware::from_fn(no_store))
 }
 
@@ -69,17 +116,26 @@ async fn regulatory_state(State(store): State<Store>) -> Response {
     }
 }
 
-async fn status(State(store): State<Store>) -> Response {
+async fn status(State(store): State<Store>, State(runtime): State<RuntimeSlot>) -> Response {
     match store.is_ready().await {
-        Ok(true) => Json(serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "phase": 1,
-            "ready": true,
-            "runtime_enabled": false,
-            "ai_enabled": false,
-            "browsing_enabled": false,
-        }))
-        .into_response(),
+        Ok(true) => {
+            let cognition = match &runtime.0 {
+                Some(runtime) => Some(runtime.status().await.engine),
+                None => None,
+            };
+            Json(serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "phase": 3,
+                "ready": true,
+                "memory_enabled": true,
+                "runtime_enabled": runtime.0.is_some(),
+                // Self-developed cognition only; no external AI provider exists.
+                "cognition": cognition,
+                "external_ai_enabled": false,
+                "browsing_enabled": false,
+            }))
+            .into_response()
+        }
         Ok(false) => unavailable("not_initialized"),
         Err(_) => unavailable("storage_unavailable"),
     }
@@ -113,6 +169,7 @@ async fn policy() -> Json<serde_json::Value> {
         Action::SendMessage,
         Action::SpendMoney,
         Action::ModifyInfrastructure,
+        Action::AskOwner,
     ];
     let entries: Vec<_> = actions
         .into_iter()
@@ -250,7 +307,7 @@ mod tests {
                 .unwrap();
         assert_eq!(value["actor"], "autonomous");
         let actions = value["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 12);
+        assert_eq!(actions.len(), 13);
         for name in ["edit_protected_identity", "change_permissions"] {
             assert_eq!(
                 actions

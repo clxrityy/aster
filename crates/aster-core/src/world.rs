@@ -1,4 +1,4 @@
-//! Phase 1 regulatory snapshots only: no elapsed-time or action-based dynamics.
+//! Regulatory level snapshots. Dynamics live in `regulation`.
 //! Levels model internal regulatory state, not subjective feelings or authority.
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,78 @@ pub struct RegulatoryState {
     pub stimulation: Level,
     pub stress: Level,
     pub confidence: Level,
+}
+
+/// Names of the seven regulatory levels, used by configuration and traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LevelName {
+    Energy,
+    Focus,
+    CognitiveLoad,
+    Curiosity,
+    Stimulation,
+    Stress,
+    Confidence,
+}
+
+impl LevelName {
+    pub const ALL: [LevelName; 7] = [
+        LevelName::Energy,
+        LevelName::Focus,
+        LevelName::CognitiveLoad,
+        LevelName::Curiosity,
+        LevelName::Stimulation,
+        LevelName::Stress,
+        LevelName::Confidence,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LevelName::Energy => "energy",
+            LevelName::Focus => "focus",
+            LevelName::CognitiveLoad => "cognitive_load",
+            LevelName::Curiosity => "curiosity",
+            LevelName::Stimulation => "stimulation",
+            LevelName::Stress => "stress",
+            LevelName::Confidence => "confidence",
+        }
+    }
+}
+
+impl RegulatoryState {
+    pub fn get(&self, name: LevelName) -> Level {
+        match name {
+            LevelName::Energy => self.energy,
+            LevelName::Focus => self.focus,
+            LevelName::CognitiveLoad => self.cognitive_load,
+            LevelName::Curiosity => self.curiosity,
+            LevelName::Stimulation => self.stimulation,
+            LevelName::Stress => self.stress,
+            LevelName::Confidence => self.confidence,
+        }
+    }
+
+    pub fn set(&mut self, name: LevelName, level: Level) {
+        let slot = match name {
+            LevelName::Energy => &mut self.energy,
+            LevelName::Focus => &mut self.focus,
+            LevelName::CognitiveLoad => &mut self.cognitive_load,
+            LevelName::Curiosity => &mut self.curiosity,
+            LevelName::Stimulation => &mut self.stimulation,
+            LevelName::Stress => &mut self.stress,
+            LevelName::Confidence => &mut self.confidence,
+        };
+        *slot = level;
+    }
+
+    /// Largest absolute per-level difference, used to skip trivial persistence.
+    pub fn max_difference(&self, other: &Self) -> f64 {
+        LevelName::ALL
+            .into_iter()
+            .map(|name| (self.get(name).get() - other.get(name).get()).abs())
+            .fold(0.0, f64::max)
+    }
 }
 
 impl Default for RegulatoryState {

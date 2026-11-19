@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/aster-core", "crates/aster-storage", "crates/aster-api"]
+members = [
+    "crates/aster-core",
+    "crates/aster-mind",
+    "crates/aster-storage",
+    "crates/aster-runtime",
+    "crates/aster-api",
+    "crates/aster-console",
+]
 resolver = "3"
 
 [workspace.package]
@@ -9,13 +16,21 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "1.0"
+aster-console = { path = "crates/aster-console" }
 aster-core = { path = "crates/aster-core" }
+aster-mind = { path = "crates/aster-mind" }
+aster-runtime = { path = "crates/aster-runtime" }
+arc-swap = "1.7"
 aster-storage = { path = "crates/aster-storage" }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
 dotenvy = "0.15"
+futures-util = "0.3"
 http-body-util = "0.1"
+ratatui = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11.1"
@@ -40,6 +55,9 @@ tokio = { version = "1.0", features = [
     "sync",
     "io-util",
 ] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "1"
+toml_edit = "0.25"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -46,6 +46,15 @@ services:
       ASTER_BIND_ADDR: "0.0.0.0:3000"
       # Container networking only; the host publication remains loopback-only.
       ASTER_ALLOW_REMOTE: "true"
+      # Live config lives in the mounted data dir so host edits and /set persist.
+      # (A directory mount, not a file mount: /set replaces the file atomically.)
+      ASTER_CONFIG: /app/data/aster.toml
+    volumes:
+      # Host ./data holds aster.toml, logs/ and ingest/. Create it before `up`.
+      - ./data:/app/data:Z   # :Z relabels for SELinux hosts; harmless elsewhere
+    # Podman: run as container uid 10001 mapped to your own host user, so files
+    # in ./data stay owned and editable by you. Docker users: remove this line.
+    userns_mode: "keep-id:uid=10001,gid=10001"
     ports:
       - "127.0.0.1:${ASTER_PORT:-3000}:3000"
     depends_on:
