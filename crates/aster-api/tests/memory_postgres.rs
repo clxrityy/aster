@@ -113,9 +113,9 @@ async fn owner_can_create_page_and_delete_private_memory(pool: PgPool) {
     assert_eq!(missing, json!({"error":"memory_not_found"}));
     assert_eq!(store.identity().await.unwrap(), Some(identity));
     let status = json_response(request(&app, "GET", "/v1/status", "").await, StatusCode::OK).await;
-    assert_eq!(status["phase"], 2);
+    assert_eq!(status["phase"], 3);
     assert_eq!(status["memory_enabled"], true);
-    for flag in ["runtime_enabled", "ai_enabled", "browsing_enabled"] {
+    for flag in ["runtime_enabled", "external_ai_enabled", "browsing_enabled"] {
         assert_eq!(status[flag], false);
     }
     let count: i64 =

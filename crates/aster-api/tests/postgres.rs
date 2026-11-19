@@ -42,7 +42,7 @@ async fn api_reads_persisted_identity_and_initial_state(pool: PgPool) {
             "/v1/state" => assert_eq!(value["state"]["energy"], 75.0),
             "/v1/status" => {
                 assert_eq!(value["runtime_enabled"], false);
-                assert_eq!(value["ai_enabled"], false);
+                assert_eq!(value["external_ai_enabled"], false);
                 assert_eq!(value["browsing_enabled"], false);
             }
             _ => assert_eq!(value["status"], "ready"),
