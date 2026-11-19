@@ -121,7 +121,7 @@ async fn serve(config: ServerConfig) -> Result<()> {
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .context("unable to bind the configured API address")?;
-    tracing::info!(bind_addr = %config.bind_addr, phase = 1, "Aster API started; autonomous runtime is not enabled");
+    tracing::info!(bind_addr = %config.bind_addr, phase = 2, "Aster API started; autonomous runtime is not enabled");
     let result = serve_with_shutdown(
         listener,
         router(store.clone(), config.owner_token),

@@ -1,7 +1,11 @@
-//! PostgreSQL-backed Phase 1 identity and regulatory snapshots.
+//! PostgreSQL-backed identity, regulatory snapshots, and owner-provided memory.
 //!
 //! Connecting, migrating, and reading never create an identity. Only explicit
 //! initialization may write the foundation; there are no snapshot mutation APIs.
+
+mod memory;
+
+pub use memory::MemoryPage;
 
 use std::time::Duration;
 
@@ -25,6 +29,10 @@ pub enum StorageError {
     Snapshot(#[from] serde_json::Error),
     #[error("stored foundation is incomplete or inconsistent")]
     InconsistentFoundation,
+    #[error("Aster has not been initialized")]
+    NotInitialized,
+    #[error("stored memory is invalid")]
+    InvalidStoredMemory(#[from] aster_core::InvalidMemory),
 }
 
 #[derive(Clone)]

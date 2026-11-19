@@ -1,4 +1,6 @@
-//! Read-only Phase 1 routes. Unsupported future capabilities are not exposed.
+//! Private inspection and owner-managed memory. No autonomous capabilities.
+
+mod memory;
 
 use aster_core::{Action, Actor, PermissionDecision, PermissionPolicy};
 use aster_storage::Store;
@@ -21,6 +23,7 @@ pub fn router(store: Store, token: OwnerToken) -> Router {
         .route("/v1/state", get(regulatory_state))
         .route("/v1/status", get(status))
         .route("/v1/policy", get(policy))
+        .merge(memory::router())
         .route_layer(middleware::from_fn_with_state(token, require_owner));
 
     Router::new()
@@ -73,8 +76,9 @@ async fn status(State(store): State<Store>) -> Response {
     match store.is_ready().await {
         Ok(true) => Json(serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "phase": 1,
+            "phase": 2,
             "ready": true,
+            "memory_enabled": true,
             "runtime_enabled": false,
             "ai_enabled": false,
             "browsing_enabled": false,
