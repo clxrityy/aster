@@ -29,6 +29,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit and non-database tests
         run: cargo test --workspace --locked
+      - name: Clippy with the neural engine
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets --locked --features aster-api/neural -- -D warnings
+      - name: Tests with the neural engine
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --locked --features aster-api/neural
 
   postgres:
     name: PostgreSQL 13.23 integration tests
@@ -56,5 +62,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.1
-      - name: Include ignored isolated PostgreSQL tests
-        run: cargo test --workspace --locked -- --include-ignored
+      - name: Include ignored isolated PostgreSQL tests (with the neural engine)
+        run: cargo test --workspace --locked --features aster-api/neural -- --include-ignored
