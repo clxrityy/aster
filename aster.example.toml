@@ -94,3 +94,12 @@ refresh_ms = 100
 show_trace = true
 training_prompt_after_reply = true
 history_turns = 50
+
+# The web dashboard, on the same port as the API. Sign in with the owner token;
+# the browser then holds an HttpOnly session cookie (never the token itself).
+[dashboard]
+enabled = true
+cookie_secure = true             # HTTPS-only cookie; fine on http://localhost too
+session_idle_minutes = 60
+session_max_hours = 12
+login_max_failures = 5           # then each failed sign-in waits longer (max 15 min)

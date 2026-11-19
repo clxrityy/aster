@@ -84,6 +84,13 @@ pub struct LearnResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct IngestFile {
+    pub path: String,
+    pub bytes: u64,
+    pub too_large: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct TrainingStatus {
     pub engine: String,
     /// Engines compiled into this build.
@@ -728,6 +735,88 @@ impl Runtime {
             note: outcome.note,
             levels,
         })
+    }
+
+    /// Files the owner could ingest: regular files inside `server.ingest_dir`
+    /// (two levels deep), with sizes, sorted by path.
+    pub async fn ingest_files(&self) -> Result<Vec<IngestFile>, RuntimeError> {
+        let server = self.config.get().server.clone();
+        let root = PathBuf::from(&server.ingest_dir);
+        let max = server.ingest_max_bytes;
+        tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            let Ok(root) = root.canonicalize() else {
+                return files;
+            };
+            let mut stack = vec![(root.clone(), 0)];
+            while let Some((dir, depth)) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    // symlink_metadata: never follow links out of the folder.
+                    let Ok(meta) = entry.path().symlink_metadata() else {
+                        continue;
+                    };
+                    let path = entry.path();
+                    if meta.is_dir() && depth < 1 {
+                        stack.push((path, depth + 1));
+                    } else if meta.is_file()
+                        && let Ok(relative) = path.strip_prefix(&root)
+                        && let Some(relative) = relative.to_str()
+                        && !relative.split('/').any(|p| p.starts_with('.'))
+                    {
+                        files.push(IngestFile {
+                            path: relative.to_string(),
+                            bytes: meta.len(),
+                            too_large: meta.len() > max,
+                        });
+                    }
+                }
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            files.truncate(500);
+            files
+        })
+        .await
+        .map_err(|_| RuntimeError::Invalid("could not list the ingest folder".into()))
+    }
+
+    /// The newest `limit` entries of a log category (today's file, else the
+    /// latest day that has one), oldest first.
+    pub async fn log_tail(
+        &self,
+        category: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if !crate::config::LOG_CATEGORIES.contains(&category) {
+            return Err(RuntimeError::Invalid(format!(
+                "category must be one of {}",
+                crate::config::LOG_CATEGORIES.join(", ")
+            )));
+        }
+        let dir = PathBuf::from(&self.config.get().logs.dir).join(category);
+        let limit = limit.clamp(1, 1000);
+        tokio::task::spawn_blocking(move || {
+            let newest = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                .max();
+            let Some(file) = newest else {
+                return Vec::new();
+            };
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(limit)..]
+                .iter()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        })
+        .await
+        .map_err(|_| RuntimeError::Invalid("could not read the log".into()))
     }
 
     /// Called after the owner creates a memory through the memory API.

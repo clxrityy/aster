@@ -152,7 +152,7 @@ pub const HELP: &[&str] = &[
     "  /pause  /resume             freeze or resume regulation and initiative",
     "  /status  /history           mind statistics / recent level changes",
     "  /snapshot [reason]  /snapshots  /rollback <version>",
-    "  /logs <category> [n]        tail today's JSONL log (conversations, thoughts, levels, …)",
+    "  /logs <category> [n]        tail the newest JSONL log (conversations, thoughts, levels, …)",
     "  /trace (Ctrl-T)             toggle the thought-trace panel",
     "  /mouse                      toggle mouse scrolling (off lets you select text)",
     "  /clear  /help  /quit",
@@ -1003,39 +1003,22 @@ impl App {
     }
 }
 
-/// Read the tail of today's local log file for `category`.
+/// The tail of the newest log file for `category`, read through the server
+/// (so it works against a remote Aster too).
 async fn tail_log(client: Client, category: String, count: usize) -> Msg {
-    let dir = match client.get("/v1/config").await {
-        Ok(value) => value["config"]["logs"]["dir"]
-            .as_str()
-            .unwrap_or("data/logs")
-            .to_string(),
-        Err(error) => return Msg::Notice(error, true),
-    };
-    // Files are named by date, so the lexically last one is the newest.
-    let today = latest_file(&format!("{dir}/{category}"));
-    let Some(path) = today else {
-        return Msg::Notice(format!("no log files under {dir}/{category}"), true);
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(count);
-            let mut out = vec![format!("── {path} (last {}) ──", lines.len() - start)];
-            out.extend(lines[start..].iter().map(|l| short(l, 200)));
+    match client
+        .get(&format!("/v1/logs/{category}?limit={count}"))
+        .await
+    {
+        Ok(Value::Array(entries)) if entries.is_empty() => {
+            Msg::Notice(format!("no {category} log entries yet"), true)
+        }
+        Ok(Value::Array(entries)) => {
+            let mut out = vec![format!("── {category} (last {}) ──", entries.len())];
+            out.extend(entries.iter().map(|e| short(&e.to_string(), 200)));
             Msg::Print(out)
         }
-        Err(_) => Msg::Notice(format!("cannot read {path}"), true),
+        Ok(_) => Msg::Notice("unexpected log response".into(), true),
+        Err(error) => Msg::Notice(error, true),
     }
-}
-
-fn latest_file(dir: &str) -> Option<String> {
-    let mut files: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().display().to_string())
-        .filter(|p| p.ends_with(".jsonl"))
-        .collect();
-    files.sort();
-    files.pop()
 }

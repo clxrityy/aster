@@ -169,6 +169,35 @@ pub struct AsterConfig {
     pub cognition: CognitionParams,
     pub logs: LogsSection,
     pub console: ConsoleSection,
+    pub dashboard: DashboardSection,
+}
+
+/// The web dashboard served on the API's own port (same origin, no CORS).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DashboardSection {
+    pub enabled: bool,
+    /// Mark the session cookie `Secure` (HTTPS only). Keep on behind a TLS
+    /// proxy or tunnel; browsers also accept it on http://localhost.
+    pub cookie_secure: bool,
+    /// Sign out after this long without a request.
+    pub session_idle_minutes: u64,
+    /// Sign out this long after signing in, whatever happens.
+    pub session_max_hours: u64,
+    /// Failed sign-ins allowed before each further one waits (doubling, up to 15 min).
+    pub login_max_failures: u32,
+}
+
+impl Default for DashboardSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cookie_secure: true,
+            session_idle_minutes: 60,
+            session_max_hours: 12,
+            login_max_failures: 5,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -290,6 +319,20 @@ impl AsterConfig {
                 )));
             }
         }
+        let w = &self.dashboard;
+        range(
+            "dashboard.session_idle_minutes",
+            w.session_idle_minutes,
+            1,
+            7 * 24 * 60,
+        )?;
+        range(
+            "dashboard.session_max_hours",
+            w.session_max_hours,
+            1,
+            24 * 30,
+        )?;
+        range("dashboard.login_max_failures", w.login_max_failures, 1, 100)?;
         if self.logs.dir.trim().is_empty() {
             return Err(ConfigError::Invalid("logs.dir must be set".into()));
         }

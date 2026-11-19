@@ -89,6 +89,8 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/feedback", post(feedback))
         .route("/v1/teach", post(teach))
         .route("/v1/ingest", post(ingest))
+        .route("/v1/ingest/files", get(ingest_files))
+        .route("/v1/logs/{category}", get(log_tail))
         .route("/v1/outbound", get(outbound))
         .route("/v1/outbound/{id}/answer", post(answer))
         .route("/v1/outbound/{id}/approve", post(approve))
@@ -193,7 +195,9 @@ async fn require_runtime(State(guard): State<Guard>, request: Request, next: Nex
 async fn limits(State(guard): State<Guard>, request: Request, next: Next) -> Response {
     let runtime = runtime!(guard.runtime);
     let server = runtime.config().get().server.clone();
-    if !guard.limiter.allow(server.rate_limit_per_minute) {
+    // Reads (dashboard resyncs, TUI refreshes) don't spend the write budget.
+    let read = request.method() == axum::http::Method::GET;
+    if !read && !guard.limiter.allow(server.rate_limit_per_minute) {
         return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited", None);
     }
     let declared = request
@@ -513,6 +517,21 @@ async fn corpus(State(slot): State<RuntimeSlot>) -> Response {
         runtime.corpus().await,
     )
         .into_response()
+}
+
+async fn ingest_files(State(slot): State<RuntimeSlot>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.ingest_files().await)
+}
+
+async fn log_tail(
+    State(slot): State<RuntimeSlot>,
+    Path(category): Path<String>,
+    query: Result<Query<LimitQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let limit = query.ok().and_then(|q| q.0.limit).unwrap_or(100).max(1) as usize;
+    respond(runtime.log_tail(&category, limit).await)
 }
 
 async fn training(State(slot): State<RuntimeSlot>) -> Response {

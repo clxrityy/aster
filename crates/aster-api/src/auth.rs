@@ -1,4 +1,5 @@
-//! The owner actor is established by authentication, never by request content.
+//! The owner actor is established by authentication, never by request content:
+//! the bearer token (TUI, scripts) or a dashboard session cookie (browser).
 
 use axum::{
     Json,
@@ -10,6 +11,8 @@ use axum::{
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+
+use crate::session::{Sessions, Verdict};
 
 /// Retain only a fixed-size digest, not a printable credential.
 #[derive(Clone)]
@@ -35,7 +38,7 @@ impl OwnerToken {
         })
     }
 
-    fn matches(&self, value: &str) -> bool {
+    pub(crate) fn matches(&self, value: &str) -> bool {
         if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return false;
         }
@@ -44,21 +47,29 @@ impl OwnerToken {
     }
 }
 
-pub async fn require_owner(
-    State(token): State<OwnerToken>,
-    request: Request,
-    next: Next,
-) -> Response {
+/// Both ways the owner can authenticate.
+#[derive(Clone)]
+pub struct Auth {
+    pub token: OwnerToken,
+    pub sessions: Sessions,
+}
+
+pub async fn require_owner(State(auth): State<Auth>, request: Request, next: Next) -> Response {
     let headers = request.headers().get_all(header::AUTHORIZATION);
-    let mut values = headers.iter();
-    let authorized = values
-        .next()
-        .filter(|_| values.next().is_none())
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .is_some_and(|(scheme, value)| {
-            scheme.eq_ignore_ascii_case("bearer") && token.matches(value)
-        });
+    let authorized = if headers.iter().next().is_some() {
+        // A bearer attempt is judged on its own; a cookie never rescues it.
+        let mut values = headers.iter();
+        values
+            .next()
+            .filter(|_| values.next().is_none())
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once(' '))
+            .is_some_and(|(scheme, value)| {
+                scheme.eq_ignore_ascii_case("bearer") && auth.token.matches(value)
+            })
+    } else {
+        auth.sessions.verify(request.method(), request.headers()) == Verdict::Valid
+    };
 
     if !authorized {
         return (
