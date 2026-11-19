@@ -382,13 +382,18 @@ mod tests {
                 .iter()
                 .any(|c| c.source == CandidateSource::Neural)
         );
+        // Greedy decoding, so what the network says doesn't hinge on a dice roll.
+        let mut params = params;
+        params.neural.top_k = 1;
+        params.neural.temperature = 0.2;
+        params.neural.train_steps_per_tick = 150;
+        mind.train(&params, Duration::from_secs(30)).unwrap();
         let report = mind.train(&params, Duration::from_secs(30)).unwrap();
         // The time cap may stop a slow machine early; it must still get past
         // the point where the network is allowed to speak.
-        assert!(report.steps as u64 > MIN_STEPS_TO_SPEAK, "{report:?}");
-        assert_eq!(report.total_steps, u64::from(report.steps));
+        assert!(report.total_steps > MIN_STEPS_TO_SPEAK, "{report:?}");
         assert!(report.loss.is_finite());
-        assert_eq!(mind.training_history().len(), 1);
+        assert_eq!(mind.training_history().len(), 2);
         let after = ask(mind.as_mut(), "how are you doing", &params);
         assert_eq!(after.trace.engine, ENGINE);
         assert_eq!(after.trace.decision, Decision::Reply);
@@ -405,7 +410,7 @@ mod tests {
             .any(|n| n.contains("neural candidate repeated"));
         assert!(neural || agreed, "{:?}", after.trace);
         let stats = mind.stats();
-        assert_eq!(stats["neural_steps"], f64::from(report.steps));
+        assert_eq!(stats["neural_steps"], report.total_steps as f64);
         assert!(stats["neural_corpus_bytes"] > 16.0);
     }
 
