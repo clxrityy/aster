@@ -18,6 +18,9 @@ pub enum CandidateSource {
     Generated,
     /// A question back to the owner.
     Question,
+    /// A meaning the owner taught, said back when asked what something means
+    /// (or acknowledged when the owner states one).
+    Definition,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

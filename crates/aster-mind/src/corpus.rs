@@ -11,6 +11,10 @@ pub fn export(mind: &StatisticalMind) -> String {
         out.push_str(&association.reply);
         out.push_str("\n\n");
     }
+    for (subject, meaning) in mind.lexicon() {
+        out.push_str(&crate::understand::phrase(subject, meaning));
+        out.push_str("\n\n");
+    }
     for doc in mind.recall_index().docs() {
         out.push_str(doc.text.trim());
         out.push_str("\n\n");

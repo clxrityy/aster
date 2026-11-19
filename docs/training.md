@@ -5,21 +5,33 @@ Aster starts empty. It learns from:
 - **teaching:** `/teach hello => Hi, I'm Aster.`
 - **rating:** in `/train` mode, `+` reinforces and `-` weakens. Use `/correct Better reply.` to replace a bad reply.
 - **answering:** when Aster doesn't know a word or a reply, it asks. Use `/answer 1 <text>`.
+- **talking:** say what something means in plain words: `a nebula means a cloud of gas`, or `it's a friendly greeting` right after Aster asks.
 - **memories:** `/remember Rust is my main language.` Aster can then recall it.
 - **files:** put text in `data/ingest/`, then run `/ingest notes.txt`. This adds to its vocabulary, language model and recall.
+
+Aster keeps two kinds of knowledge apart:
+
+| | learned from | used when you |
+|---|---|---|
+| **meanings** | answering "What does X mean?", or saying "X means …" | ask `what is X`, `what does X mean`, `define X`, `tell me about X` |
+| **replies** | `/teach`, `/correct`, answering "How would you reply to …?", `+` | say anything else |
+
+So telling Aster what "hello" means teaches it the meaning, not to recite that meaning whenever you say hello.
 
 A typical loop:
 
 ```
 /train
-hello                         → I don't know "hello" yet. What does it mean?
-/answer 1 a friendly greeting
-/teach hello => Hi! Good to see you.
+hello                         → I don't know what "hello" means yet. What does it mean?
+it's a friendly greeting      → Got it. "hello" means a friendly greeting.
+hello                         → I'm not sure how to answer that yet. How would you reply to "hello"?
+/answer 1 Hi! Good to see you.
 hello                         → Hi! Good to see you.
 +
+what does hello mean          → "hello" means a friendly greeting.
 ```
 
-When Aster knows the words but has no good reply, it asks "How would you reply to …?" instead. Your `/answer` then becomes that reply.
+`/answer` works for either question. Rating a meaning with `-` forgets it; `/correct` replaces it.
 
 How a reply is chosen (shown in the thought trace):
 

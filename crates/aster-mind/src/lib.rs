@@ -7,6 +7,7 @@ pub mod ngram;
 pub mod recall;
 pub mod rng;
 pub mod text;
+pub mod understand;
 
 #[cfg(feature = "neural")]
 pub mod neural;

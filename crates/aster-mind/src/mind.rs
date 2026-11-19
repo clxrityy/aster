@@ -1,6 +1,9 @@
-//! The statistical mind: associations reinforced by owner feedback, BM25
-//! recall, and an n-gram language model. Every reply is chosen by explicit
-//! scores recorded in the trace; when nothing scores high enough, Aster asks.
+//! The statistical mind: a lexicon of meanings, reply associations reinforced
+//! by owner feedback, BM25 recall, and an n-gram language model. Each message is
+//! first read for intent (asking a meaning, stating one, or talking), so what a
+//! word *means* and what to *say* are learned and used separately. Every reply
+//! is chosen by explicit scores recorded in the trace; when nothing scores high
+//! enough, Aster asks.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -17,10 +20,11 @@ use crate::{
     recall::RecallIndex,
     rng::Rng,
     text::{content_terms, excerpt, is_stopword, normalize, render, tokens, words},
+    understand::{self, Intent},
 };
 
 const ENGINE: &str = "statistical";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const RECENT_TURNS: usize = 128;
 const CURIOSITY_QUEUE: usize = 32;
 const MAX_WEIGHT: f64 = 3.0;
@@ -51,6 +55,8 @@ enum Chosen {
     Association(usize),
     Text(String),
     Question,
+    /// Said or learned the meaning of this lexicon key.
+    Definition(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +73,14 @@ pub struct StatisticalMind {
     ngram: NgramModel,
     recall: RecallIndex,
     associations: Vec<Association>,
+    /// What things mean: lexicon key → meaning. Used only to answer questions
+    /// about meaning, never as a reply to the word itself.
+    #[serde(default)]
+    lexicon: BTreeMap<String, String>,
+    /// The subject of a meaning question Aster asked on the previous turn, so
+    /// "it means …" can be understood.
+    #[serde(default)]
+    last_asked: Option<String>,
     recent: VecDeque<RecentTurn>,
     curious_about: VecDeque<String>,
     asked: HashSet<String>,
@@ -90,6 +104,8 @@ impl StatisticalMind {
             ngram: NgramModel::default(),
             recall: RecallIndex::default(),
             associations: Vec::new(),
+            lexicon: BTreeMap::new(),
+            last_asked: None,
             recent: VecDeque::new(),
             curious_about: VecDeque::new(),
             asked: HashSet::new(),
@@ -104,8 +120,10 @@ impl StatisticalMind {
 
     pub fn restore(bytes: &[u8], params: &CognitionParams) -> Result<Self, SnapshotError> {
         let mut mind: Self = serde_json::from_slice(bytes).map_err(|_| SnapshotError)?;
-        if mind.format_version != FORMAT_VERSION {
-            return Err(SnapshotError);
+        match mind.format_version {
+            FORMAT_VERSION => {}
+            1 => mind.migrate_v1(),
+            _ => return Err(SnapshotError),
         }
         mind.rng = Rng::new(params.rng_seed);
         Ok(mind)
@@ -117,6 +135,107 @@ impl StatisticalMind {
 
     pub fn recall_index(&self) -> &RecallIndex {
         &self.recall
+    }
+
+    pub fn lexicon(&self) -> &BTreeMap<String, String> {
+        &self.lexicon
+    }
+
+    /// Version 1 stored answered meanings as replies to "what is X" and as
+    /// recall documents, so the meaning came back whenever the word did. Move
+    /// them into the lexicon.
+    fn migrate_v1(&mut self) {
+        let mut remap = Vec::with_capacity(self.associations.len());
+        let mut kept = Vec::new();
+        for association in std::mem::take(&mut self.associations) {
+            let prompt = normalize(&association.prompt);
+            match prompt.strip_prefix("what is ") {
+                Some(subject) if association.source == AssociationSource::Answered => {
+                    let subject = understand::key(subject);
+                    self.lexicon.insert(subject.clone(), association.reply);
+                    remap.push(Err(subject));
+                }
+                _ => {
+                    remap.push(Ok(kept.len()));
+                    kept.push(association);
+                }
+            }
+        }
+        self.associations = kept;
+        for turn in &mut self.recent {
+            if let Chosen::Association(i) = turn.chosen {
+                turn.chosen = match remap.get(i) {
+                    Some(Ok(new)) => Chosen::Association(*new),
+                    Some(Err(subject)) => Chosen::Definition(subject.clone()),
+                    None => Chosen::Question,
+                };
+            }
+        }
+        let stale: Vec<String> = self
+            .recall
+            .docs()
+            .iter()
+            .filter(|doc| {
+                doc.id
+                    .strip_prefix("answer:")
+                    .is_some_and(|rest| !rest.chars().all(|c| c.is_ascii_digit()))
+            })
+            .map(|doc| doc.id.clone())
+            .collect();
+        for id in stale {
+            self.recall.remove(&id);
+        }
+        self.format_version = FORMAT_VERSION;
+    }
+
+    /// Store a meaning; returns a note for the trace.
+    fn define(&mut self, subject: &str, meaning: &str) -> String {
+        let key = understand::key(subject);
+        let meaning = understand::clean_meaning(&key, meaning);
+        for word in key.split(' ') {
+            *self.vocab.entry(word.to_string()).or_default() += 1;
+        }
+        self.asked.insert(key.clone());
+        self.curious_about.retain(|t| *t != key);
+        let note = if self.lexicon.contains_key(&key) {
+            format!("updated what “{key}” means")
+        } else {
+            format!("learned what “{key}” means")
+        };
+        self.lexicon.insert(key, meaning);
+        note
+    }
+
+    /// Find a meaning for a subject: exact, singular, then its last word.
+    fn lookup(&self, subject: &str) -> Option<(String, String)> {
+        let key = understand::key(subject);
+        let mut tries = vec![key.clone()];
+        if let Some(singular) = key.strip_suffix('s')
+            && singular.len() > 2
+        {
+            tries.push(singular.to_string());
+        }
+        if let Some(last) = key.rsplit(' ').next()
+            && last != key
+        {
+            tries.push(last.to_string());
+        }
+        tries.into_iter().find_map(|k| {
+            let meaning = self.lexicon.get(&k)?.clone();
+            Some((k, meaning))
+        })
+    }
+
+    /// A statement of meaning is accepted when it says "means", or when it is
+    /// about something Aster asked about. "It"/"that" refer to the last question.
+    fn accept_statement(&self, subject: &str, means: bool) -> Option<String> {
+        if understand::is_pronoun(subject) {
+            return self.last_asked.clone();
+        }
+        let asked_about = self.last_asked.as_deref() == Some(subject)
+            || self.asked.contains(subject)
+            || self.curious_about.iter().any(|t| t == subject);
+        (means || asked_about).then(|| subject.to_string())
     }
 
     fn observe(&mut self, text: &str, order: usize) {
@@ -224,6 +343,54 @@ impl Cognition for StatisticalMind {
         let mut notes = Vec::new();
         let level = |value: aster_core::Level| value.get() / 100.0;
 
+        // Read intent first: meanings are answered from the lexicon, statements
+        // of meaning are learned, everything else goes to the reply candidates.
+        let intent = understand::read(context.text);
+        let mut asked_subject = None;
+        let mut events_extra = Vec::new();
+        let direct: Option<(Candidate, Chosen)> = match &intent {
+            Intent::State {
+                subject,
+                meaning,
+                means,
+            } => self.accept_statement(subject, *means).map(|subject| {
+                let resolved = self.last_asked.as_deref() == Some(subject.as_str());
+                notes.push(self.define(&subject, meaning));
+                events_extra.push(if resolved {
+                    RegulationEvent::QuestionAnswered
+                } else {
+                    RegulationEvent::Taught
+                });
+                let stored = self.lexicon[&understand::key(&subject)].clone();
+                (
+                    Candidate {
+                        text: format!("Got it. {}", understand::phrase(&subject, &stored)),
+                        source: CandidateSource::Definition,
+                        score: 1.0,
+                        components: BTreeMap::new(),
+                    },
+                    Chosen::Definition(understand::key(&subject)),
+                )
+            }),
+            Intent::AskMeaning { subject } => {
+                asked_subject = Some(understand::key(subject));
+                self.lookup(subject).map(|(key, meaning)| {
+                    notes.push(format!("asked what “{subject}” means; found “{key}”"));
+                    (
+                        Candidate {
+                            text: understand::phrase(&key, &meaning),
+                            source: CandidateSource::Definition,
+                            score: 0.9,
+                            components: BTreeMap::new(),
+                        },
+                        Chosen::Definition(key),
+                    )
+                })
+            }
+            Intent::Talk => None,
+        };
+        self.last_asked = None;
+
         // Candidates from associations.
         let mut scored: Vec<(Candidate, Chosen)> = Vec::new();
         for (index, association) in self.associations.iter().enumerate() {
@@ -321,6 +488,10 @@ impl Cognition for StatisticalMind {
 
         scored.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
         scored.truncate(8);
+        let has_direct = direct.is_some();
+        if let Some(direct) = direct {
+            scored.insert(0, direct);
+        }
 
         // Level-adjusted threshold within the owner's bounds.
         let base = Self::lerp(
@@ -335,7 +506,9 @@ impl Cognition for StatisticalMind {
 
         let mut chosen_index = None;
         let mut explored = false;
-        if let Some((best, _)) = scored.first()
+        if has_direct {
+            chosen_index = Some(0);
+        } else if let Some((best, _)) = scored.first()
             && best.score >= threshold
         {
             chosen_index = Some(0);
@@ -354,6 +527,7 @@ impl Cognition for StatisticalMind {
         if !unknown.is_empty() {
             events.push(RegulationEvent::UnknownConcept);
         }
+        events.extend(events_extra);
 
         let (text, decision, question, chosen) = match chosen_index {
             Some(index) => {
@@ -368,13 +542,22 @@ impl Cognition for StatisticalMind {
                 notes.push(format!(
                     "best score {confidence:.2} below threshold {threshold:.2}; asking instead"
                 ));
-                // Ask about the most specific (longest) unknown term.
-                let subject = unknown.iter().max_by_key(|t| t.chars().count()).cloned();
+                // Asked what something means → ask for that meaning. Otherwise
+                // ask about the most specific (longest) unknown term.
+                let subject = asked_subject
+                    .clone()
+                    .or_else(|| unknown.iter().max_by_key(|t| t.chars().count()).cloned());
                 let mut draft = if let Some(term) = subject {
+                    let rationale = if asked_subject.is_some() {
+                        format!("no meaning learned for “{term}”")
+                    } else {
+                        format!("“{term}” is not in my vocabulary")
+                    };
                     let mut draft = OutboundDraft::question(
-                        format!("I don't know “{term}” yet. What does it mean?"),
-                        format!("“{term}” is not in my vocabulary"),
+                        format!("I don't know what “{term}” means yet. What does it mean?"),
+                        rationale,
                     );
+                    self.last_asked = Some(term.clone());
                     self.asked.insert(term.clone());
                     self.curious_about.retain(|t| *t != term);
                     let rest: Vec<String> =
@@ -471,6 +654,30 @@ impl Cognition for StatisticalMind {
                     };
                 };
                 let mut notes = Vec::new();
+                if let Chosen::Definition(key) = &turn.chosen {
+                    // Feedback on a meaning corrects the lexicon, not replies.
+                    let key = key.clone();
+                    match correction.filter(|c| !c.trim().is_empty()) {
+                        Some(correction) => {
+                            self.observe(&correction, order);
+                            notes.push(self.define(&key, &correction));
+                        }
+                        None if rating < 0 => {
+                            self.lexicon.remove(&key);
+                            notes.push(format!("forgot what “{key}” means"));
+                        }
+                        None => {}
+                    }
+                    notes.push(format!(
+                        "reward_ema {:.2}, exploration {:.2}, caution {:.2}",
+                        self.reward_ema, self.exploration, self.caution
+                    ));
+                    return LearnOutcome {
+                        events: vec![event],
+                        note: notes.join("; "),
+                        updated: true,
+                    };
+                }
                 match (&turn.chosen, rating > 0) {
                     (Chosen::Association(i), true) => {
                         if let Some(a) = self.associations.get_mut(*i) {
@@ -524,21 +731,11 @@ impl Cognition for StatisticalMind {
                 self.observe(&answer, order);
                 let mut notes = Vec::new();
                 if let Some(subject) = subject {
-                    *self.vocab.entry(subject.clone()).or_default() += 1;
-                    self.asked.insert(subject.clone());
-                    self.curious_about.retain(|t| *t != subject);
-                    self.recall.add(
-                        &format!("answer:{subject}"),
-                        "answer",
-                        &format!("{subject}: {answer}"),
-                    );
-                    notes.push(self.add_association(
-                        &format!("what is {subject}"),
-                        &answer,
-                        AssociationSource::Answered,
-                        1.0,
-                        lr,
-                    ));
+                    // An answer to "what does X mean?" is a meaning, not a reply.
+                    if self.last_asked.as_deref() == Some(understand::key(&subject).as_str()) {
+                        self.last_asked = None;
+                    }
+                    notes.push(self.define(&subject, &answer));
                 } else if let Some(prompt) = prompt {
                     notes.push(self.add_association(
                         &prompt,
@@ -626,6 +823,7 @@ impl Cognition for StatisticalMind {
         }
         if let Some(term) = self.curious_about.pop_front() {
             self.asked.insert(term.clone());
+            self.last_asked = Some(term.clone());
             let mut draft = OutboundDraft::question(
                 format!("Earlier you mentioned “{term}”. What does it mean?"),
                 format!(
@@ -659,6 +857,7 @@ impl Cognition for StatisticalMind {
             ("vocabulary".into(), self.vocab.len() as f64),
             ("ngram_tokens".into(), self.ngram.tokens_seen as f64),
             ("associations".into(), self.associations.len() as f64),
+            ("meanings".into(), self.lexicon.len() as f64),
             ("recall_documents".into(), self.recall.len() as f64),
             ("curiosity_queue".into(), self.curious_about.len() as f64),
             ("reward_ema".into(), self.reward_ema),
@@ -813,6 +1012,118 @@ mod tests {
             &params(),
         );
         assert_eq!(ask(&mut mind, "today").1.text, "Today is a good day.");
+    }
+
+    #[test]
+    fn a_meaning_is_not_a_reply() {
+        let mut mind = StatisticalMind::new(&params());
+        let (_, first) = ask(&mut mind, "hello");
+        let question = first.question.unwrap();
+        assert_eq!(question.subject.as_deref(), Some("hello"));
+        mind.learn(
+            LearningSignal::Answer {
+                subject: question.subject,
+                prompt: question.prompt,
+                answer: "it means a friendly greeting".into(),
+            },
+            &params(),
+        );
+        // Saying the word does not recite its meaning; Aster asks how to reply.
+        let (_, said) = ask(&mut mind, "hello");
+        assert_eq!(said.trace.decision, Decision::Ask);
+        assert!(said.text.contains("How would you reply"), "{}", said.text);
+        assert!(!said.text.contains("greeting"));
+        // Asking what it means does.
+        let (_, meaning) = ask(&mut mind, "What does hello mean?");
+        assert_eq!(meaning.trace.decision, Decision::Reply);
+        assert_eq!(meaning.text, "“hello” means a friendly greeting.");
+    }
+
+    #[test]
+    fn meanings_can_be_stated_in_conversation() {
+        let mut mind = StatisticalMind::new(&params());
+        let (_, asked) = ask(&mut mind, "I saw a nebula");
+        assert!(asked.text.contains("nebula"));
+        let (_, ack) = ask(&mut mind, "it's a cloud of gas and dust");
+        assert_eq!(ack.text, "Got it. “nebula” means a cloud of gas and dust.");
+        assert_eq!(
+            mind.lexicon().get("nebula").map(String::as_str),
+            Some("a cloud of gas and dust")
+        );
+        let (_, ack) = ask(&mut mind, "A quasar means a very bright galactic core.");
+        assert!(ack.text.starts_with("Got it."));
+        let (_, answer) = ask(&mut mind, "what is a quasar?");
+        assert!(answer.text.contains("bright galactic core"));
+        // "it's …" with nothing pending is just talk.
+        let (_, talk) = ask(&mut mind, "it's raining");
+        assert!(!talk.text.starts_with("Got it."));
+        assert!(!mind.lexicon().contains_key("it"));
+    }
+
+    #[test]
+    fn feedback_on_a_meaning_corrects_the_lexicon() {
+        let mut mind = StatisticalMind::new(&params());
+        ask(&mut mind, "what is rust");
+        mind.learn(
+            LearningSignal::Answer {
+                subject: Some("rust".into()),
+                prompt: None,
+                answer: "a kind of metal".into(),
+            },
+            &params(),
+        );
+        let (id, _) = ask(&mut mind, "what is rust");
+        mind.learn(
+            LearningSignal::Feedback {
+                turn_id: id,
+                rating: -1,
+                correction: Some("a programming language".into()),
+            },
+            &params(),
+        );
+        assert!(mind.associations().is_empty());
+        assert_eq!(
+            ask(&mut mind, "define rust").1.text,
+            "“rust” means a programming language."
+        );
+    }
+
+    #[test]
+    fn version_one_snapshots_move_meanings_into_the_lexicon() {
+        let mut mind = StatisticalMind::new(&params());
+        mind.learn(
+            LearningSignal::Teach {
+                prompt: "ping".into(),
+                reply: "pong".into(),
+            },
+            &params(),
+        );
+        mind.associations.insert(
+            0,
+            Association {
+                prompt: "what is hello".into(),
+                words: vec!["what".into(), "is".into(), "hello".into()],
+                reply: "a friendly greeting".into(),
+                weight: 1.0,
+                uses: 0,
+                source: AssociationSource::Answered,
+            },
+        );
+        mind.recall
+            .add("answer:hello", "answer", "hello: a friendly greeting");
+        mind.format_version = 1;
+        let bytes = mind.snapshot().unwrap();
+        let mut restored = StatisticalMind::restore(&bytes, &params()).unwrap();
+        assert_eq!(restored.associations().len(), 1);
+        assert_eq!(restored.recall_index().len(), 0);
+        assert_eq!(ask(&mut restored, "ping").1.text, "pong");
+        assert!(!ask(&mut restored, "hello").1.text.contains("greeting"));
+        assert!(
+            ask(&mut restored, "what is hello")
+                .1
+                .text
+                .contains("greeting")
+        );
     }
 
     #[test]
