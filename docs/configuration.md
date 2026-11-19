@@ -1,6 +1,6 @@
 # configuration
 
-`aster.toml` in the working directory, or `--config <path>`, or `ASTER_CONFIG`. Every key is optional. [`aster.example.toml`](../aster.example.toml) lists them all with defaults.
+Compose: `data/aster.toml`. Native: `aster.toml` in the working directory, `--config <path>`, or `ASTER_CONFIG`. Every key is optional. [`aster.example.toml`](../aster.example.toml) lists them all with defaults.
 
 Change it live, three ways:
 
@@ -9,7 +9,7 @@ Change it live, three ways:
 ```
 
 ```bash
-$EDITOR aster.toml                          # picked up within ~1s
+$EDITOR data/aster.toml                     # picked up within ~1s
 ```
 
 ```bash
