@@ -139,6 +139,10 @@ pub const HELP: &[&str] = &[
     "  /train  /chat               switch mode (train asks you to rate each reply)",
     "  /good  /bad  /correct <t>   rate the last reply (in train mode: + or -)",
     "  /teach <prompt> => <reply>  teach a reply directly",
+    "  /prefer <n>                 use candidate n of the last reply instead (see trace)",
+    "  /rate <n> + | -             rate candidate n of the last reply",
+    "  /irrelevant <n>             recalled item n did not belong with that prompt",
+    "  /reconsider                 ask for a different reply to your last message",
     "  /answer <n> <text>          answer inbox item n",
     "  /approve <n>  /deny <n>     decide on request n",
     "  /remember <text>            store a memory     /forget <memory-id>",
@@ -679,6 +683,52 @@ impl App {
         );
     }
 
+    /// Steering commands on the last Aster reply (numbers as in the trace panel).
+    fn steer(&mut self, name: &str, rest: &str) {
+        let Some(turn_id) = self.last_aster_turn.clone() else {
+            self.error("no reply to steer yet");
+            return;
+        };
+        let mut words = rest.split_whitespace();
+        let index = words
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(1));
+        let (path, body, done) = match (name, index, words.next()) {
+            ("reconsider", _, _) => {
+                self.status = "Aster is reconsidering…".into();
+                self.spawn(move |client| async move {
+                    let path = format!("/v1/turns/{turn_id}/reconsider");
+                    match client.post(&path, json!({})).await {
+                        Ok(result) => Msg::Chat(result),
+                        Err(error) => Msg::Notice(error, true),
+                    }
+                });
+                return;
+            }
+            ("prefer", Some(i), None) => (
+                format!("/v1/turns/{turn_id}/prefer"),
+                json!({ "candidate": i }),
+                "preferred",
+            ),
+            ("rate", Some(i), Some(sign @ ("+" | "-"))) => (
+                format!("/v1/turns/{turn_id}/candidates/{i}/rate"),
+                json!({ "rating": if sign == "+" { 1 } else { -1 } }),
+                "candidate rated",
+            ),
+            ("irrelevant", Some(i), None) => (
+                format!("/v1/turns/{turn_id}/recalled/{i}/irrelevant"),
+                json!({}),
+                "marked irrelevant",
+            ),
+            _ => {
+                self.error("usage: /prefer <n> · /rate <n> + | - · /irrelevant <n> · /reconsider");
+                return;
+            }
+        };
+        self.call(Method::POST, path, Some(body), done);
+    }
+
     fn submit(&mut self, line: &str) {
         if self.awaiting_rating && (line == "+" || line == "-") {
             self.rate(if line == "+" { 1 } else { -1 }, None);
@@ -732,6 +782,7 @@ impl App {
                     "mouse off: drag to select and copy text; /mouse turns scrolling back on"
                 });
             }
+            "prefer" | "rate" | "irrelevant" | "reconsider" => self.steer(name, rest),
             "good" => self.rate(1, None),
             "bad" => self.rate(-1, None),
             "correct" if !rest.is_empty() => self.rate(-1, Some(rest.to_string())),

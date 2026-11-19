@@ -344,6 +344,7 @@ mod tests {
             text,
             levels: &RegulatoryState::default(),
             params,
+            avoid: None,
         })
     }
 

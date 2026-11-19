@@ -9,8 +9,8 @@ mod runtime;
 
 pub use memory::MemoryPage;
 pub use runtime::{
-    Exchange, ExchangeOutcome, OutboundRecord, SnapshotInfo, StateHistoryEntry, StoredSnapshot,
-    TurnRecord,
+    Exchange, ExchangeOutcome, OutboundRecord, Reconsideration, SnapshotInfo, StateHistoryEntry,
+    StoredExchange, StoredSnapshot, TurnRecord, TurnSignal,
 };
 
 use std::time::Duration;

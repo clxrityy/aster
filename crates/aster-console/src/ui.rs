@@ -341,9 +341,10 @@ fn draw_trace(frame: &mut Frame, app: &App, area: Rect) {
             }
             if let Some(recalled) = trace["recalled"].as_array().filter(|r| !r.is_empty()) {
                 lines.push(Line::from("recalled".dark_gray()));
-                for item in recalled {
+                for (i, item) in recalled.iter().enumerate() {
                     lines.push(Line::from(format!(
-                        " {:>5.2} {}",
+                        " {:>2} {:>5.2} {}",
+                        i + 1,
                         num(&item["score"]),
                         item["excerpt"].as_str().unwrap_or("").replace('\n', " ")
                     )));
@@ -357,7 +358,7 @@ fn draw_trace(frame: &mut Frame, app: &App, area: Rect) {
                     let source = candidate["source"].as_str().unwrap_or("");
                     lines.push(Line::from(vec![
                         Span::styled(mark, Style::new().fg(Color::Green)),
-                        Span::raw(format!("{:>5.2} ", num(&candidate["score"]))),
+                        Span::raw(format!("{:>2} {:>5.2} ", i + 1, num(&candidate["score"]))),
                         Span::styled(format!("{:<11} ", source), Style::new().fg(Color::DarkGray)),
                         Span::raw(candidate["text"].as_str().unwrap_or("").replace('\n', " ")),
                     ]));

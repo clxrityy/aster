@@ -9,12 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aster_core::CandidateSource;
 use aster_core::{
     Cognition, LearnOutcome, LearningSignal, MemoryCursor, MemoryPageSize, MemoryRecord,
     OutboundDraft, OutboundStatus, RegulationEvent, RegulatoryState, RequestEffect, ThoughtTrace,
     TurnContext,
 };
-use aster_storage::{Exchange, OutboundRecord, SnapshotInfo, StorageError, Store, TurnRecord};
+use aster_storage::{
+    Exchange, OutboundRecord, Reconsideration, SnapshotInfo, StorageError, Store, StoredExchange,
+    TurnRecord, TurnSignal,
+};
 use chrono::Utc;
 use serde::Serialize;
 use thiserror::Error;
@@ -308,7 +312,22 @@ impl Runtime {
     // ----- conversation -------------------------------------------------
 
     pub async fn chat(&self, text: &str, mode: Mode) -> Result<ChatResult, RuntimeError> {
+        self.reply(text, mode, None).await
+    }
+
+    /// A chat turn, optionally threaded as a reply to an earlier turn.
+    pub async fn reply(
+        &self,
+        text: &str,
+        mode: Mode,
+        reply_to: Option<Uuid>,
+    ) -> Result<ChatResult, RuntimeError> {
         let text = validate_text("text", text)?;
+        if let Some(id) = reply_to
+            && self.store.turn(id).await?.is_none()
+        {
+            return Err(RuntimeError::Invalid("reply_to is not a known turn".into()));
+        }
         let cfg = self.config.get();
         let turn_id = Uuid::new_v4();
         let (levels, conversation_id) = {
@@ -323,6 +342,7 @@ impl Runtime {
                 text: &text,
                 levels: &levels,
                 params: &cfg.cognition,
+                avoid: None,
             })
         };
         let levels = self.regulate(&response.events);
@@ -334,6 +354,7 @@ impl Runtime {
                 owner_turn_id: turn_id,
                 mode: mode.as_str(),
                 owner_text: &text,
+                owner_reply_to: reply_to,
                 aster_text: &response.text,
                 trace: &response.trace,
                 question: question.as_ref(),
@@ -380,6 +401,202 @@ impl Runtime {
             .thought(turn_id)
             .await?
             .ok_or(RuntimeError::NotFound)
+    }
+
+    // ----- steering -----------------------------------------------------
+
+    async fn stored(
+        &self,
+        aster_turn: Uuid,
+    ) -> Result<(StoredExchange, ThoughtTrace), RuntimeError> {
+        let exchange = self
+            .store
+            .exchange(aster_turn)
+            .await?
+            .ok_or(RuntimeError::NotFound)?;
+        let trace: ThoughtTrace = serde_json::from_value(exchange.trace.clone())
+            .map_err(|_| RuntimeError::Conflict("this turn's trace cannot be read".into()))?;
+        Ok((exchange, trace))
+    }
+
+    fn candidate(
+        trace: &ThoughtTrace,
+        index: usize,
+    ) -> Result<aster_core::Candidate, RuntimeError> {
+        let candidate = trace.candidates.get(index).cloned().ok_or_else(|| {
+            RuntimeError::Invalid(format!(
+                "candidate must be within 0..{}",
+                trace.candidates.len()
+            ))
+        })?;
+        if candidate.source == CandidateSource::Question {
+            return Err(RuntimeError::Invalid(
+                "a question is not a reply; answer it instead".into(),
+            ));
+        }
+        Ok(candidate)
+    }
+
+    /// The owner picked candidate `index` of an Aster turn as the best reply.
+    pub async fn prefer(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+    ) -> Result<LearnResult, RuntimeError> {
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let candidate = Self::candidate(&trace, index)?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "prefer",
+                candidate_index: Some(index as u32),
+                rating: None,
+                detail: Some(&candidate.text),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "prefer",
+                LearningSignal::Prefer {
+                    turn_id: exchange.owner.id,
+                    prompt: exchange.owner.text,
+                    text: candidate.text,
+                    source: candidate.source,
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// Rate one candidate of an Aster turn, chosen or not.
+    pub async fn rate_candidate(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+        rating: i8,
+    ) -> Result<LearnResult, RuntimeError> {
+        if rating == 0 {
+            return Err(RuntimeError::Invalid(
+                "rating must be good (+1) or bad (-1)".into(),
+            ));
+        }
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let candidate = Self::candidate(&trace, index)?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "rate",
+                candidate_index: Some(index as u32),
+                rating: Some(rating.signum()),
+                detail: Some(&candidate.text),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "rate_candidate",
+                LearningSignal::RateCandidate {
+                    prompt: exchange.owner.text,
+                    text: candidate.text,
+                    source: candidate.source,
+                    rating: rating.signum(),
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// A recalled document did not belong with this turn's prompt.
+    pub async fn mark_irrelevant(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+    ) -> Result<LearnResult, RuntimeError> {
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let recalled = trace.recalled.get(index).cloned().ok_or_else(|| {
+            RuntimeError::Invalid(format!(
+                "recalled item must be within 0..{}",
+                trace.recalled.len()
+            ))
+        })?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "irrelevant",
+                candidate_index: Some(index as u32),
+                rating: None,
+                detail: Some(&recalled.source),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "irrelevant",
+                LearningSignal::Irrelevant {
+                    prompt: exchange.owner.text,
+                    document: recalled.source,
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// Ask Aster for a different reply to the same owner turn. The new reply is
+    /// a new Aster turn; nothing is learned until the owner rates or prefers.
+    pub async fn reconsider(&self, aster_turn: Uuid) -> Result<ChatResult, RuntimeError> {
+        let (exchange, _) = self.stored(aster_turn).await?;
+        let cfg = self.config.get();
+        let levels = self.levels();
+        let response = {
+            let mut mind = self.mind.lock().await;
+            mind.respond(&TurnContext {
+                turn_id: exchange.owner.id,
+                text: &exchange.owner.text,
+                levels: &levels,
+                params: &cfg.cognition,
+                avoid: Some(&exchange.aster.text),
+            })
+        };
+        let aster = self
+            .store
+            .record_reconsideration(&Reconsideration {
+                owner_turn_id: exchange.owner.id,
+                previous_aster_turn: aster_turn,
+                aster_text: &response.text,
+                trace: &response.trace,
+                state: &levels,
+            })
+            .await?;
+        self.inner().last_activity = Instant::now();
+        self.emit(Event::Turn {
+            turn: aster.clone(),
+        });
+        self.emit(Event::Thought {
+            turn_id: aster.id,
+            trace: Box::new(response.trace.clone()),
+        });
+        self.after_updates(1).await;
+        Ok(ChatResult {
+            owner: exchange.owner,
+            aster,
+            trace: response.trace,
+            outbound: None,
+            levels,
+        })
+    }
+
+    pub async fn turn_signals(
+        &self,
+        aster_turn: Uuid,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        Ok(self.store.turn_signals(aster_turn).await?)
     }
 
     // ----- learning -----------------------------------------------------

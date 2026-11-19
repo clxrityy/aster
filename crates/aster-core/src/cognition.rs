@@ -9,7 +9,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    outbound::OutboundDraft, regulation::RegulationEvent, trace::ThoughtTrace,
+    outbound::OutboundDraft,
+    regulation::RegulationEvent,
+    trace::{CandidateSource, ThoughtTrace},
     world::RegulatoryState,
 };
 
@@ -202,6 +204,9 @@ pub struct TurnContext<'a> {
     pub text: &'a str,
     pub levels: &'a RegulatoryState,
     pub params: &'a CognitionParams,
+    /// Reconsidering an earlier reply: explore at the owner's upper bound,
+    /// pick something other than this text, and don't relearn the prompt.
+    pub avoid: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +244,26 @@ pub enum LearningSignal {
     Ingest {
         name: String,
         text: String,
+    },
+    /// The owner picked another of a turn's candidates as the best reply.
+    /// `text`/`source` come from the stored trace, never from the client.
+    Prefer {
+        turn_id: Uuid,
+        prompt: String,
+        text: String,
+        source: CandidateSource,
+    },
+    /// A rating on one candidate (chosen or not).
+    RateCandidate {
+        prompt: String,
+        text: String,
+        source: CandidateSource,
+        rating: i8,
+    },
+    /// A recalled document did not belong with this prompt's terms.
+    Irrelevant {
+        prompt: String,
+        document: String,
     },
 }
 

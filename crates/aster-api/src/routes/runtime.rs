@@ -75,6 +75,17 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/chat", post(chat))
         .route("/v1/turns", get(turns))
         .route("/v1/thoughts/{turn_id}", get(thought))
+        .route("/v1/turns/{turn_id}/prefer", post(prefer))
+        .route(
+            "/v1/turns/{turn_id}/candidates/{index}/rate",
+            post(rate_candidate),
+        )
+        .route(
+            "/v1/turns/{turn_id}/recalled/{index}/irrelevant",
+            post(irrelevant),
+        )
+        .route("/v1/turns/{turn_id}/reconsider", post(reconsider))
+        .route("/v1/turns/{turn_id}/signals", get(signals))
         .route("/v1/feedback", post(feedback))
         .route("/v1/teach", post(teach))
         .route("/v1/ingest", post(ingest))
@@ -213,6 +224,8 @@ struct ChatInput {
     text: String,
     #[serde(default)]
     mode: Mode,
+    /// Thread this message under an earlier turn.
+    reply_to: Option<Uuid>,
 }
 
 async fn chat(
@@ -221,7 +234,7 @@ async fn chat(
 ) -> Response {
     let runtime = runtime!(slot);
     let input = body!(input);
-    respond(runtime.chat(&input.text, input.mode).await)
+    respond(runtime.reply(&input.text, input.mode, input.reply_to).await)
 }
 
 #[derive(Deserialize)]
@@ -239,6 +252,56 @@ async fn turns(State(slot): State<RuntimeSlot>, Query(query): Query<LimitQuery>)
 async fn thought(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
     let runtime = runtime!(slot);
     respond(runtime.thought(turn_id).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreferInput {
+    candidate: usize,
+}
+
+async fn prefer(
+    State(slot): State<RuntimeSlot>,
+    Path(turn_id): Path<Uuid>,
+    input: Result<Json<PreferInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.prefer(turn_id, input.candidate).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RateInput {
+    rating: i8,
+}
+
+async fn rate_candidate(
+    State(slot): State<RuntimeSlot>,
+    Path((turn_id, index)): Path<(Uuid, usize)>,
+    input: Result<Json<RateInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.rate_candidate(turn_id, index, input.rating).await)
+}
+
+async fn irrelevant(
+    State(slot): State<RuntimeSlot>,
+    Path((turn_id, index)): Path<(Uuid, usize)>,
+) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.mark_irrelevant(turn_id, index).await)
+}
+
+async fn reconsider(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.reconsider(turn_id).await)
+}
+
+async fn signals(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.turn_signals(turn_id).await)
 }
 
 #[derive(Deserialize)]
