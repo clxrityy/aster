@@ -416,18 +416,17 @@ impl Runtime {
         let correction = correction
             .map(|c| validate_text("correction", c))
             .transpose()?;
-        if !self
+        // Cognition knows an exchange by its owner turn; the owner rates the Aster turn.
+        let exchange = self
             .store
             .record_feedback(turn_id, rating, correction.as_deref())
             .await?
-        {
-            return Err(RuntimeError::NotFound);
-        }
+            .ok_or(RuntimeError::NotFound)?;
         let (outcome, levels) = self
             .learn(
                 "feedback",
                 LearningSignal::Feedback {
-                    turn_id,
+                    turn_id: exchange,
                     rating: rating.signum(),
                     correction,
                 },

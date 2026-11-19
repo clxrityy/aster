@@ -312,36 +312,40 @@ impl Store {
     }
 
     /// Record a rating for an Aster turn. Returns false if no such Aster turn.
+    /// Records feedback on an Aster turn. Returns the owner turn it replied to
+    /// (the id cognition knows the exchange by), or `None` when `turn_id` is not
+    /// an Aster turn.
     pub async fn record_feedback(
         &self,
         turn_id: Uuid,
         rating: i8,
         correction: Option<&str>,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<Uuid>, StorageError> {
         let mut tx = self.pool.begin().await?;
         let identity_id = memory_identity(&mut tx).await?;
-        let inserted = sqlx::query(
-            "INSERT INTO aster_feedback (turn_id, rating, correction)
-             SELECT id, $2, $3 FROM aster_turns WHERE id = $1 AND role = 'aster'",
-        )
-        .bind(turn_id)
-        .bind(i16::from(rating.signum()))
-        .bind(correction.map(bounded))
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            == 1;
-        if inserted {
-            audit(
-                &mut tx,
-                identity_id,
-                "feedback_recorded",
-                serde_json::json!({ "turn_id": turn_id, "rating": rating.signum() }),
-            )
+        let reply_to: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT reply_to FROM aster_turns WHERE id = $1 AND role = 'aster'")
+                .bind(turn_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(reply_to) = reply_to else {
+            return Ok(None);
+        };
+        sqlx::query("INSERT INTO aster_feedback (turn_id, rating, correction) VALUES ($1, $2, $3)")
+            .bind(turn_id)
+            .bind(i16::from(rating.signum()))
+            .bind(correction.map(bounded))
+            .execute(&mut *tx)
             .await?;
-        }
+        audit(
+            &mut tx,
+            identity_id,
+            "feedback_recorded",
+            serde_json::json!({ "turn_id": turn_id, "rating": rating.signum() }),
+        )
+        .await?;
         tx.commit().await?;
-        Ok(inserted)
+        Ok(Some(reply_to.unwrap_or(turn_id)))
     }
 
     pub async fn create_outbound(

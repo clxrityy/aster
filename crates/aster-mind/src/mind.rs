@@ -941,11 +941,16 @@ impl Cognition for StatisticalMind {
             draft.subject = Some(term);
             return Some(draft);
         }
-        if self.associations.is_empty() && !self.asked_for_first_lesson {
+        // Pack replies are borrowed; only the owner's own lessons count here.
+        let taught_by_owner = self
+            .associations
+            .iter()
+            .any(|a| a.source != AssociationSource::Pack);
+        if !taught_by_owner && !self.asked_for_first_lesson {
             self.asked_for_first_lesson = true;
             return Some(OutboundDraft::question(
                 "I haven't learned any replies yet. What would you like to teach me first?",
-                "no associations learned",
+                "no replies taught by the owner yet",
             ));
         }
         None
@@ -999,6 +1004,16 @@ mod tests {
             params: &params,
         });
         (id, response)
+    }
+
+    #[test]
+    fn starter_pack_still_asks_for_a_first_lesson_once() {
+        let params = params();
+        let mut mind = crate::build(&params, None).unwrap();
+        let levels = RegulatoryState::default();
+        let first = mind.initiative(&levels, &params).unwrap();
+        assert!(first.body.contains("teach me first"));
+        assert!(mind.initiative(&levels, &params).is_none());
     }
 
     #[test]
