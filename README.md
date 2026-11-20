@@ -5,6 +5,7 @@ you help shape that process
 
 uses no external APIs
 
+- read my [blog](https://mjanglin.com/projects/dev/aster)
 - see [/docs](./docs)
 
 ![chat](.github/assets/chat.png)
