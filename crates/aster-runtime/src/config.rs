@@ -17,7 +17,19 @@ use tokio::sync::broadcast;
 
 use crate::events::{Envelope, Event};
 
-pub const LOG_CATEGORIES: [&str; 7] = [
+pub const LOG_CATEGORIES: [&str; 8] = [
+    "conversations",
+    "thoughts",
+    "levels",
+    "memories",
+    "requests",
+    "config",
+    "runtime",
+    "training",
+];
+
+/// Logged unless the owner opts out; "training" (one line per tick) is opt-in.
+const DEFAULT_LOGS: [&str; 7] = [
     "conversations",
     "thoughts",
     "levels",
@@ -119,7 +131,7 @@ impl Default for LogsSection {
     fn default() -> Self {
         Self {
             dir: "data/logs".into(),
-            enabled: LOG_CATEGORIES.iter().map(|c| c.to_string()).collect(),
+            enabled: DEFAULT_LOGS.iter().map(|c| c.to_string()).collect(),
             retention_days: 30,
         }
     }
@@ -157,6 +169,35 @@ pub struct AsterConfig {
     pub cognition: CognitionParams,
     pub logs: LogsSection,
     pub console: ConsoleSection,
+    pub dashboard: DashboardSection,
+}
+
+/// The web dashboard served on the API's own port (same origin, no CORS).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DashboardSection {
+    pub enabled: bool,
+    /// Mark the session cookie `Secure` (HTTPS only). Keep on behind a TLS
+    /// proxy or tunnel; browsers also accept it on http://localhost.
+    pub cookie_secure: bool,
+    /// Sign out after this long without a request.
+    pub session_idle_minutes: u64,
+    /// Sign out this long after signing in, whatever happens.
+    pub session_max_hours: u64,
+    /// Failed sign-ins allowed before each further one waits (doubling, up to 15 min).
+    pub login_max_failures: u32,
+}
+
+impl Default for DashboardSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cookie_secure: true,
+            session_idle_minutes: 60,
+            session_max_hours: 12,
+            login_max_failures: 5,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -265,6 +306,12 @@ impl AsterConfig {
         self.cognition
             .validate()
             .map_err(|e| ConfigError::Invalid(e.0))?;
+        if !aster_mind::available_engines().contains(&self.cognition.engine.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "cognition.engine {:?} is not in this build (rebuild with --features neural)",
+                self.cognition.engine
+            )));
+        }
         for category in &self.logs.enabled {
             if !LOG_CATEGORIES.contains(&category.as_str()) {
                 return Err(ConfigError::Invalid(format!(
@@ -272,6 +319,20 @@ impl AsterConfig {
                 )));
             }
         }
+        let w = &self.dashboard;
+        range(
+            "dashboard.session_idle_minutes",
+            w.session_idle_minutes,
+            1,
+            7 * 24 * 60,
+        )?;
+        range(
+            "dashboard.session_max_hours",
+            w.session_max_hours,
+            1,
+            24 * 30,
+        )?;
+        range("dashboard.login_max_failures", w.login_max_failures, 1, 100)?;
         if self.logs.dir.trim().is_empty() {
             return Err(ConfigError::Invalid("logs.dir must be set".into()));
         }
@@ -410,6 +471,19 @@ impl ConfigHandle {
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    /// Validate and install a whole config in memory, without touching the
+    /// file (embedding and tests). Returns the changed keys.
+    pub fn replace(&self, config: AsterConfig) -> Result<Vec<String>, ConfigError> {
+        config.validate()?;
+        let text = self
+            .inner
+            .last_text
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Ok(self.install(text, config))
     }
 
     pub fn get(&self) -> Arc<AsterConfig> {

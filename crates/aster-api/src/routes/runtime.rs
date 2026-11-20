@@ -75,9 +75,22 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/chat", post(chat))
         .route("/v1/turns", get(turns))
         .route("/v1/thoughts/{turn_id}", get(thought))
+        .route("/v1/turns/{turn_id}/prefer", post(prefer))
+        .route(
+            "/v1/turns/{turn_id}/candidates/{index}/rate",
+            post(rate_candidate),
+        )
+        .route(
+            "/v1/turns/{turn_id}/recalled/{index}/irrelevant",
+            post(irrelevant),
+        )
+        .route("/v1/turns/{turn_id}/reconsider", post(reconsider))
+        .route("/v1/turns/{turn_id}/signals", get(signals))
         .route("/v1/feedback", post(feedback))
         .route("/v1/teach", post(teach))
         .route("/v1/ingest", post(ingest))
+        .route("/v1/ingest/files", get(ingest_files))
+        .route("/v1/logs/{category}", get(log_tail))
         .route("/v1/outbound", get(outbound))
         .route("/v1/outbound/{id}/answer", post(answer))
         .route("/v1/outbound/{id}/approve", post(approve))
@@ -90,6 +103,7 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/mind/snapshots", get(snapshots).post(save_snapshot))
         .route("/v1/mind/rollback", post(rollback))
         .route("/v1/mind/corpus", get(corpus))
+        .route("/v1/mind/training", get(training))
         .layer(DefaultBodyLimit::disable())
         .route_layer(middleware::from_fn_with_state(guard.clone(), limits));
     // The event stream is long-lived: no timeout, but still requires a runtime.
@@ -181,7 +195,9 @@ async fn require_runtime(State(guard): State<Guard>, request: Request, next: Nex
 async fn limits(State(guard): State<Guard>, request: Request, next: Next) -> Response {
     let runtime = runtime!(guard.runtime);
     let server = runtime.config().get().server.clone();
-    if !guard.limiter.allow(server.rate_limit_per_minute) {
+    // Reads (dashboard resyncs, TUI refreshes) don't spend the write budget.
+    let read = request.method() == axum::http::Method::GET;
+    if !read && !guard.limiter.allow(server.rate_limit_per_minute) {
         return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited", None);
     }
     let declared = request
@@ -212,6 +228,8 @@ struct ChatInput {
     text: String,
     #[serde(default)]
     mode: Mode,
+    /// Thread this message under an earlier turn.
+    reply_to: Option<Uuid>,
 }
 
 async fn chat(
@@ -220,7 +238,7 @@ async fn chat(
 ) -> Response {
     let runtime = runtime!(slot);
     let input = body!(input);
-    respond(runtime.chat(&input.text, input.mode).await)
+    respond(runtime.reply(&input.text, input.mode, input.reply_to).await)
 }
 
 #[derive(Deserialize)]
@@ -238,6 +256,56 @@ async fn turns(State(slot): State<RuntimeSlot>, Query(query): Query<LimitQuery>)
 async fn thought(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
     let runtime = runtime!(slot);
     respond(runtime.thought(turn_id).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreferInput {
+    candidate: usize,
+}
+
+async fn prefer(
+    State(slot): State<RuntimeSlot>,
+    Path(turn_id): Path<Uuid>,
+    input: Result<Json<PreferInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.prefer(turn_id, input.candidate).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RateInput {
+    rating: i8,
+}
+
+async fn rate_candidate(
+    State(slot): State<RuntimeSlot>,
+    Path((turn_id, index)): Path<(Uuid, usize)>,
+    input: Result<Json<RateInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.rate_candidate(turn_id, index, input.rating).await)
+}
+
+async fn irrelevant(
+    State(slot): State<RuntimeSlot>,
+    Path((turn_id, index)): Path<(Uuid, usize)>,
+) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.mark_irrelevant(turn_id, index).await)
+}
+
+async fn reconsider(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.reconsider(turn_id).await)
+}
+
+async fn signals(State(slot): State<RuntimeSlot>, Path(turn_id): Path<Uuid>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.turn_signals(turn_id).await)
 }
 
 #[derive(Deserialize)]
@@ -449,6 +517,26 @@ async fn corpus(State(slot): State<RuntimeSlot>) -> Response {
         runtime.corpus().await,
     )
         .into_response()
+}
+
+async fn ingest_files(State(slot): State<RuntimeSlot>) -> Response {
+    let runtime = runtime!(slot);
+    respond(runtime.ingest_files().await)
+}
+
+async fn log_tail(
+    State(slot): State<RuntimeSlot>,
+    Path(category): Path<String>,
+    query: Result<Query<LimitQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let limit = query.ok().and_then(|q| q.0.limit).unwrap_or(100).max(1) as usize;
+    respond(runtime.log_tail(&category, limit).await)
+}
+
+async fn training(State(slot): State<RuntimeSlot>) -> Response {
+    let runtime = runtime!(slot);
+    Json(runtime.training().await).into_response()
 }
 
 fn sse(envelope: &Envelope) -> Option<SseEvent> {

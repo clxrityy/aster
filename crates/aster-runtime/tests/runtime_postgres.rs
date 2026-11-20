@@ -117,3 +117,133 @@ async fn idle_initiative_is_bounded_and_deduplicated(pool: PgPool) {
     assert!(runtime.decide(pending[0].id, true).await.is_err());
     runtime.shutdown().await;
 }
+
+#[cfg(feature = "neural")]
+#[sqlx::test(migrations = "../../migrations")]
+#[ignore = "requires disposable PostgreSQL; run with --include-ignored and DATABASE_URL"]
+async fn neural_engine_trains_on_ticks_survives_restart_and_switches_live(pool: PgPool) {
+    let store = Store::from_pool(pool);
+    store.initialize().await.unwrap();
+    let (config, _) = test_config("neural");
+    let mut neural = (*config.get()).clone();
+    neural.cognition.engine = "neural".into();
+    neural.cognition.neural.hidden = 32;
+    neural.cognition.neural.min_corpus_bytes = 16;
+    neural.cognition.neural.train_steps_per_tick = 20;
+    // Only the explicit ticks below run; no background ticker races them.
+    neural.runtime.tick_interval_ms = 3_600_000;
+    config.replace(neural.clone()).unwrap();
+    let runtime = Runtime::start(store.clone(), config.clone()).await.unwrap();
+    assert_eq!(runtime.status().await.engine, "neural");
+    runtime.teach("good morning", "Morning!").await.unwrap();
+    runtime.teach("thank you", "Any time.").await.unwrap();
+    for _ in 0..3 {
+        runtime.tick().await.unwrap();
+    }
+    let training = runtime.training().await;
+    assert_eq!(training.history.len(), 3);
+    let steps = training.stats["neural_steps"];
+    assert!(steps > 0.0 && steps <= 60.0, "{steps}");
+
+    runtime.shutdown().await;
+    let restarted = Runtime::start(store.clone(), config.clone()).await.unwrap();
+    assert_eq!(restarted.training().await.stats["neural_steps"], steps);
+
+    // Switching the engine in config rebuilds the mind on the next tick.
+    let mut statistical = neural;
+    statistical.cognition.engine = "statistical".into();
+    config.replace(statistical).unwrap();
+    restarted.tick().await.unwrap();
+    assert_eq!(restarted.status().await.engine, "statistical");
+    assert_eq!(
+        restarted
+            .chat("thank you", Mode::Chat)
+            .await
+            .unwrap()
+            .aster
+            .text,
+        "Any time."
+    );
+    let latest = store.list_mind_snapshots(1).await.unwrap();
+    assert_eq!(latest[0].engine, "statistical");
+    restarted.shutdown().await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+#[ignore = "requires disposable PostgreSQL; run with --include-ignored and DATABASE_URL"]
+async fn steering_prefers_rates_reconsiders_and_threads(pool: PgPool) {
+    let store = Store::from_pool(pool.clone());
+    store.initialize().await.unwrap();
+    let (config, _) = test_config("steering");
+    let runtime = Runtime::start(store.clone(), config).await.unwrap();
+    runtime
+        .teach("hello there", "Hello! What are we doing today?")
+        .await
+        .unwrap();
+    runtime.teach("hello", "Hi.").await.unwrap();
+
+    // The starter pack adds its own greetings, so pick whichever reply lost.
+    let first = runtime.chat("hello", Mode::Chat).await.unwrap();
+    let other = first
+        .trace
+        .candidates
+        .iter()
+        .enumerate()
+        .position(|(i, c)| {
+            Some(i) != first.trace.chosen
+                && c.source == aster_core::CandidateSource::Association
+                && c.text != first.aster.text
+        })
+        .expect("a passed-over association");
+    let other_text = first.trace.candidates[other].text.clone();
+
+    // Out-of-range indexes and owner turns are refused.
+    assert!(runtime.prefer(first.aster.id, 99).await.is_err());
+    assert!(runtime.prefer(first.owner.id, other).await.is_err());
+
+    runtime.prefer(first.aster.id, other).await.unwrap();
+    assert_eq!(
+        runtime.chat("hello", Mode::Chat).await.unwrap().aster.text,
+        other_text
+    );
+    runtime
+        .rate_candidate(first.aster.id, other, 1)
+        .await
+        .unwrap();
+
+    // Reconsider gives another reply to the same owner turn, as a new Aster turn.
+    let again = runtime.reconsider(first.aster.id).await.unwrap();
+    assert_eq!(again.owner.id, first.owner.id);
+    assert_ne!(again.aster.id, first.aster.id);
+    assert_eq!(again.aster.reply_to, Some(first.owner.id));
+    assert!(store.thought(again.aster.id).await.unwrap().is_some());
+
+    // Each signal and its audit landed together.
+    let signals = runtime.turn_signals(first.aster.id).await.unwrap();
+    let kinds: Vec<&str> = signals
+        .iter()
+        .map(|s| s["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["prefer", "rate", "reconsider"]);
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM aster_audit_events WHERE kind = 'turn_signal_recorded'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audits, 3);
+
+    // Threading: a reply can point at an earlier turn, but not at nothing.
+    let threaded = runtime
+        .reply("about that", Mode::Chat, Some(first.aster.id))
+        .await
+        .unwrap();
+    assert_eq!(threaded.owner.reply_to, Some(first.aster.id));
+    assert!(
+        runtime
+            .reply("hm", Mode::Chat, Some(uuid::Uuid::new_v4()))
+            .await
+            .is_err()
+    );
+    runtime.shutdown().await;
+}

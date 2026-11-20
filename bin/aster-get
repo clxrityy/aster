@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# aster-get [section.key]: show live configuration (all of it, or one key).
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+json="$(api GET /v1/config)"
+if [[ $# -eq 0 ]]; then
+    printf '%s\n' "$json"
+elif command -v jq >/dev/null 2>&1; then
+    printf '%s' "$json" | jq --arg key "$1" '.config | getpath($key | split("."))'
+elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 -I -c '
+import json, sys
+value = json.load(sys.stdin)["config"]
+for part in sys.argv[1].split("."):
+    value = value[part]
+print(json.dumps(value, indent=2))' "$1"
+else
+    die "install jq (or python3) to pick out one key"
+fi

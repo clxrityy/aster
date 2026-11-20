@@ -34,6 +34,23 @@ const MIN_SIMILARITY: f64 = 0.2;
 const MIN_GENERATION_TOKENS: u64 = 30;
 /// Pack replies start below taught ones (1.0), so the owner's own replies win.
 const PACK_WEIGHT: f64 = 0.8;
+/// A reply the owner picked from the candidates (like a correction).
+const PREFERRED_WEIGHT: f64 = 1.5;
+/// Score kept by a recall document marked irrelevant for the query.
+const SUPPRESSED_FACTOR: f64 = 0.25;
+/// Reconsidering may choose down to this fraction of the threshold.
+const RECONSIDER_FACTOR: f64 = 0.75;
+
+fn source_name(source: CandidateSource) -> &'static str {
+    match source {
+        CandidateSource::Association => "learned-reply",
+        CandidateSource::Recall => "recall",
+        CandidateSource::Generated => "generated",
+        CandidateSource::Neural => "neural",
+        CandidateSource::Question => "question",
+        CandidateSource::Definition => "meaning",
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +59,8 @@ pub enum AssociationSource {
     Corrected,
     Answered,
     Reinforced,
+    /// The owner picked this reply from a turn's candidates.
+    Preferred,
     /// Loaded from a pack (the built-in starter pack or an ingested `.aster` file).
     Pack,
 }
@@ -104,6 +123,10 @@ pub struct StatisticalMind {
     caution: f64,
     updates: u64,
     asked_for_first_lesson: bool,
+    /// Recall documents the owner marked irrelevant, with the terms they
+    /// were irrelevant for (document id → terms).
+    #[serde(default)]
+    suppressed: HashMap<String, BTreeSet<String>>,
     #[serde(skip)]
     rng: Rng,
 }
@@ -128,6 +151,7 @@ impl StatisticalMind {
             caution: 0.5,
             updates: 0,
             asked_for_first_lesson: false,
+            suppressed: HashMap::new(),
             rng: Rng::new(params.rng_seed),
         }
     }
@@ -153,6 +177,11 @@ impl StatisticalMind {
 
     pub fn lexicon(&self) -> &BTreeMap<String, String> {
         &self.lexicon
+    }
+
+    /// Learning updates so far (changes whenever what Aster knows changes).
+    pub fn updates(&self) -> u64 {
+        self.updates
     }
 
     /// Version 1 stored answered meanings as replies to "what is X" and as
@@ -383,6 +412,11 @@ impl StatisticalMind {
     }
 
     fn remember_turn(&mut self, turn_id: Uuid, prompt: &str, chosen: Chosen) {
+        // Reconsidering replaces what was chosen for the same exchange.
+        if let Some(turn) = self.recent.iter_mut().find(|t| t.turn_id == turn_id) {
+            turn.chosen = chosen;
+            return;
+        }
         self.recent.push_back(RecentTurn {
             turn_id,
             prompt: prompt.into(),
@@ -412,17 +446,13 @@ impl StatisticalMind {
         self.caution = (self.caution + step).clamp(0.0, 1.0);
     }
 
-    fn lerp(min: f64, max: f64, position: f64) -> f64 {
-        min + (max - min) * position.clamp(0.0, 1.0)
-    }
-}
-
-impl Cognition for StatisticalMind {
-    fn engine(&self) -> &'static str {
-        ENGINE
-    }
-
-    fn respond(&mut self, context: &TurnContext<'_>) -> Response {
+    /// The full turn pipeline. `extra` may add one more scored candidate (the
+    /// neural engine's), given the owner's text and the current exploration.
+    pub(crate) fn respond_with(
+        &mut self,
+        context: &TurnContext<'_>,
+        extra: &mut dyn FnMut(&str, f64) -> Option<Candidate>,
+    ) -> Response {
         let params = context.params;
         let levels = context.levels;
         let toks = tokens(context.text);
@@ -527,13 +557,22 @@ impl Cognition for StatisticalMind {
                 score: bm25,
                 excerpt: excerpt(&doc.text, 120),
             });
-            let score = bm25 / (bm25 + 3.0) * 0.7;
+            let mut score = bm25 / (bm25 + 3.0) * 0.7;
+            let mut components = BTreeMap::from([("bm25".into(), bm25)]);
+            let suppressed = self
+                .suppressed
+                .get(&doc.id)
+                .is_some_and(|marked| query.iter().any(|t| marked.contains(&stem(t))));
+            if suppressed {
+                score *= SUPPRESSED_FACTOR;
+                components.insert("marked_irrelevant".into(), SUPPRESSED_FACTOR);
+            }
             scored.push((
                 Candidate {
                     text: text.clone(),
                     source: CandidateSource::Recall,
                     score,
-                    components: BTreeMap::from([("bm25".into(), bm25)]),
+                    components,
                 },
                 Chosen::Text(text),
             ));
@@ -544,11 +583,15 @@ impl Cognition for StatisticalMind {
             * (1.0 - level(levels.cognitive_load) * 0.5))
             .round()
             .max(4.0) as usize;
-        let exploration = Self::lerp(
-            params.exploration_min,
-            params.exploration_max,
-            self.exploration,
-        );
+        let exploration = if context.avoid.is_some() {
+            params.exploration_max
+        } else {
+            Self::lerp(
+                params.exploration_min,
+                params.exploration_max,
+                self.exploration,
+            )
+        };
 
         // A generated candidate when the language model has enough data.
         if self.ngram.tokens_seen >= MIN_GENERATION_TOKENS {
@@ -585,6 +628,18 @@ impl Cognition for StatisticalMind {
             }
         }
 
+        if let Some(candidate) = extra(context.text, exploration) {
+            let duplicate = scored
+                .iter()
+                .any(|(c, _)| normalize(&c.text) == normalize(&candidate.text));
+            if duplicate {
+                notes.push("neural candidate repeated an existing one".into());
+            } else {
+                let text = candidate.text.clone();
+                scored.push((candidate, Chosen::Text(text)));
+            }
+        }
+
         scored.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
         scored.truncate(8);
         let has_direct = direct.is_some();
@@ -605,7 +660,22 @@ impl Cognition for StatisticalMind {
 
         let mut chosen_index = None;
         let mut explored = false;
-        if has_direct {
+        if let Some(previous) = context.avoid {
+            // Reconsidering: the best candidate that says something else,
+            // allowed a little below the usual threshold.
+            let previous = normalize(previous);
+            chosen_index = scored.iter().position(|(c, _)| {
+                normalize(&c.text) != previous && c.score >= threshold * RECONSIDER_FACTOR
+            });
+            explored = chosen_index.is_some_and(|i| i > 0);
+            notes.push(match chosen_index {
+                Some(i) => format!(
+                    "reconsidered: chose candidate #{} instead of the earlier reply",
+                    i + 1
+                ),
+                None => "reconsidered: no other candidate was close enough".into(),
+            });
+        } else if has_direct {
             chosen_index = Some(0);
         } else if let Some((best, _)) = scored.first()
             && best.score >= threshold
@@ -690,8 +760,10 @@ impl Cognition for StatisticalMind {
         };
 
         self.remember_turn(context.turn_id, context.text, chosen);
-        // The owner's own words are training data for vocabulary and language.
-        self.observe(context.text, params.ngram_order);
+        if context.avoid.is_none() {
+            // The owner's own words are training data for vocabulary and language.
+            self.observe(context.text, params.ngram_order);
+        }
         self.updates += 1;
 
         let trace = ThoughtTrace {
@@ -715,6 +787,20 @@ impl Cognition for StatisticalMind {
             question,
             events,
         }
+    }
+
+    fn lerp(min: f64, max: f64, position: f64) -> f64 {
+        min + (max - min) * position.clamp(0.0, 1.0)
+    }
+}
+
+impl Cognition for StatisticalMind {
+    fn engine(&self) -> &'static str {
+        ENGINE
+    }
+
+    fn respond(&mut self, context: &TurnContext<'_>) -> Response {
+        self.respond_with(context, &mut |_, _| None)
     }
 
     fn learn(&mut self, signal: LearningSignal, params: &CognitionParams) -> LearnOutcome {
@@ -875,6 +961,113 @@ impl Cognition for StatisticalMind {
                     updated: removed,
                 }
             }
+            LearningSignal::Prefer {
+                turn_id,
+                prompt,
+                text,
+                source,
+            } => {
+                // Aster had the right reply among its candidates: a reward.
+                self.self_regulate(1);
+                let mut notes = Vec::new();
+                let preferred = normalize(&text);
+                if let Some(turn) = self.recent.iter().find(|t| t.turn_id == turn_id).cloned()
+                    && let Chosen::Association(i) = turn.chosen
+                    && let Some(association) = self.associations.get_mut(i)
+                    && normalize(&association.reply) != preferred
+                {
+                    association.weight -= 2.0 * lr;
+                    notes.push(format!(
+                        "association #{i} weight → {:.2} (passed over)",
+                        association.weight
+                    ));
+                }
+                notes.push(self.add_association(
+                    &prompt,
+                    &text,
+                    AssociationSource::Preferred,
+                    PREFERRED_WEIGHT,
+                    lr,
+                ));
+                let index = self.associations.iter().position(|a| {
+                    normalize(&a.prompt) == normalize(&prompt) && normalize(&a.reply) == preferred
+                });
+                if let (Some(index), Some(turn)) =
+                    (index, self.recent.iter_mut().find(|t| t.turn_id == turn_id))
+                {
+                    turn.chosen = Chosen::Association(index);
+                }
+                notes.push(format!("preferred a {} candidate", source_name(source)));
+                LearnOutcome {
+                    events: vec![RegulationEvent::PositiveFeedback],
+                    note: notes.join("; "),
+                    updated: true,
+                }
+            }
+            LearningSignal::RateCandidate {
+                prompt,
+                text,
+                source,
+                rating,
+            } => {
+                let rating = rating.signum();
+                let normalized_prompt = normalize(&prompt);
+                let normalized = normalize(&text);
+                let existing = self.associations.iter_mut().find(|a| {
+                    normalize(&a.prompt) == normalized_prompt && normalize(&a.reply) == normalized
+                });
+                let note = match (existing, rating > 0) {
+                    (Some(association), true) => {
+                        association.weight = (association.weight + lr).min(MAX_WEIGHT);
+                        format!("candidate weight → {:.2}", association.weight)
+                    }
+                    (Some(association), false) => {
+                        association.weight -= 2.0 * lr;
+                        format!("candidate weight → {:.2}", association.weight)
+                    }
+                    (None, true) => {
+                        self.add_association(&prompt, &text, AssociationSource::Reinforced, 1.0, lr)
+                    }
+                    (None, false) if source == CandidateSource::Association => {
+                        // Rated an association reached through a similar prompt:
+                        // weaken that reply wherever it is the reply.
+                        let mut weakened = 0;
+                        for association in &mut self.associations {
+                            if normalize(&association.reply) == normalized {
+                                association.weight -= lr;
+                                weakened += 1;
+                            }
+                        }
+                        format!("weakened {weakened} association(s) with this reply")
+                    }
+                    (None, false) => format!("noted a poor {} candidate", source_name(source)),
+                };
+                LearnOutcome {
+                    events: vec![if rating > 0 {
+                        RegulationEvent::PositiveFeedback
+                    } else {
+                        RegulationEvent::NegativeFeedback
+                    }],
+                    note,
+                    updated: true,
+                }
+            }
+            LearningSignal::Irrelevant { prompt, document } => {
+                let terms: BTreeSet<String> = content_terms(&tokens(&prompt))
+                    .iter()
+                    .map(|t| stem(t))
+                    .collect();
+                let count = terms.len();
+                self.suppressed
+                    .entry(document.clone())
+                    .or_default()
+                    .extend(terms);
+                LearnOutcome {
+                    events: Vec::new(),
+                    note: format!("{document} marked irrelevant for {count} term(s)"),
+                    updated: true,
+                }
+            }
             LearningSignal::Ingest { name, text } if name.ends_with(".aster") => {
                 let note = self.load_pack(&name, &text, params);
                 LearnOutcome {
@@ -1002,8 +1195,154 @@ mod tests {
             text,
             levels: &levels,
             params: &params,
+            avoid: None,
         });
         (id, response)
+    }
+
+    fn teach(mind: &mut StatisticalMind, prompt: &str, reply: &str) {
+        mind.learn(
+            LearningSignal::Teach {
+                prompt: prompt.into(),
+                reply: reply.into(),
+            },
+            &params(),
+        );
+    }
+
+    /// Two replies for similar prompts, so one turn has two association candidates.
+    fn two_greetings() -> StatisticalMind {
+        let mut mind = StatisticalMind::new(&params());
+        teach(&mut mind, "hello there", "Hello! What are we doing today?");
+        teach(&mut mind, "hello", "Hi.");
+        mind
+    }
+
+    #[test]
+    fn preferring_a_passed_over_candidate_makes_it_the_reply() {
+        let mut mind = two_greetings();
+        let (turn, first) = ask(&mut mind, "hello");
+        assert_eq!(first.text, "Hi.");
+        let other = first
+            .trace
+            .candidates
+            .iter()
+            .find(|c| c.text != "Hi." && c.source == CandidateSource::Association)
+            .cloned()
+            .expect("a second candidate");
+        let outcome = mind.learn(
+            LearningSignal::Prefer {
+                turn_id: turn,
+                prompt: "hello".into(),
+                text: other.text.clone(),
+                source: other.source,
+            },
+            &params(),
+        );
+        assert!(outcome.note.contains("passed over"), "{}", outcome.note);
+        assert_eq!(outcome.events, vec![RegulationEvent::PositiveFeedback]);
+        assert_eq!(ask(&mut mind, "hello").1.text, other.text);
+        // Later feedback on that turn applies to the preferred reply.
+        assert!(
+            mind.recent
+                .iter()
+                .any(|t| t.turn_id == turn && matches!(t.chosen, Chosen::Association(_)))
+        );
+    }
+
+    #[test]
+    fn rating_a_candidate_up_or_down_moves_its_weight() {
+        let mut mind = two_greetings();
+        let rate = |mind: &mut StatisticalMind, text: &str, rating| {
+            mind.learn(
+                LearningSignal::RateCandidate {
+                    prompt: "hello".into(),
+                    text: text.into(),
+                    source: CandidateSource::Association,
+                    rating,
+                },
+                &params(),
+            )
+        };
+        let weight = |mind: &StatisticalMind| {
+            mind.associations
+                .iter()
+                .find(|a| a.reply == "Hi.")
+                .unwrap()
+                .weight
+        };
+        let before = weight(&mind);
+        rate(&mut mind, "Hi.", -1);
+        let lowered = weight(&mind);
+        assert!((lowered - (before - 0.5)).abs() < 1e-9, "{lowered}");
+        rate(&mut mind, "Hi.", 1);
+        assert!((weight(&mind) - (lowered + 0.25)).abs() < 1e-9);
+        // A good rating on a reply Aster never learned for this prompt teaches it.
+        let note = rate(&mut mind, "Hey, you.", 1).note;
+        assert!(note.starts_with("new association"), "{note}");
+    }
+
+    #[test]
+    fn irrelevant_recall_is_suppressed_for_those_terms_only() {
+        let mut mind = StatisticalMind::new(&params());
+        mind.learn(
+            LearningSignal::Memory {
+                id: "m1".into(),
+                content: "The garden needs water every morning.".into(),
+            },
+            &params(),
+        );
+        let score = |mind: &mut StatisticalMind, text: &str| {
+            ask(mind, text)
+                .1
+                .trace
+                .candidates
+                .iter()
+                .find(|c| c.source == CandidateSource::Recall)
+                .map(|c| c.score)
+                .unwrap()
+        };
+        let before = score(&mut mind, "garden water");
+        mind.learn(
+            LearningSignal::Irrelevant {
+                prompt: "garden water".into(),
+                document: "m1".into(),
+            },
+            &params(),
+        );
+        let after = score(&mut mind, "garden water");
+        assert!(
+            (after - before * SUPPRESSED_FACTOR).abs() < 1e-9,
+            "{after} vs {before}"
+        );
+        assert!(score(&mut mind, "morning") > after);
+    }
+
+    #[test]
+    fn reconsidering_picks_another_candidate_without_relearning_the_prompt() {
+        let mut mind = two_greetings();
+        let (turn, first) = ask(&mut mind, "hello");
+        let tokens_before = mind.ngram.tokens_seen;
+        let levels = RegulatoryState::default();
+        let params = params();
+        let again = mind.respond(&TurnContext {
+            turn_id: turn,
+            text: "hello",
+            levels: &levels,
+            params: &params,
+            avoid: Some(&first.text),
+        });
+        assert_ne!(again.text, first.text);
+        assert_eq!(again.trace.exploration, params.exploration_max);
+        assert!(
+            again
+                .trace
+                .notes
+                .iter()
+                .any(|n| n.starts_with("reconsidered"))
+        );
+        assert_eq!(mind.ngram.tokens_seen, tokens_before);
+        assert_eq!(mind.recent.iter().filter(|t| t.turn_id == turn).count(), 1);
     }
 
     #[test]

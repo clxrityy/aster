@@ -1,30 +1,21 @@
 #!/usr/bin/env bash
+# aster-curl [curl options] <url | /path>: curl the API as the owner.
+# A path like /v1/runtime is sent to this machine's Aster (see aster-status).
+# The token is read from the env file and passed without appearing in `ps`.
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
-# Exit on errors and undefined variables.
-set -euo pipefail
-
-# Locate the project root relative to this script.
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Load project environment variables.
-if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
-    echo "Error: .env file not found in $PROJECT_ROOT" >&2
-    exit 1
-fi
-
-set -a
-source "$PROJECT_ROOT/.env"
-set +a
-
-# Ensure the required token exists.
-if [[ -z "${ASTER_OWNER_TOKEN:-}" ]]; then
-    echo "Error: ASTER_OWNER_TOKEN is not configured" >&2
-    exit 1
-fi
-
-# Execute curl with the authorization header.
+args=()
+for arg in "$@"; do
+    if [[ "$arg" == /* ]]; then
+        args+=("$(api_url)$arg")
+    else
+        args+=("$arg")
+    fi
+done
+token="$(owner_token)"
 exec curl \
-    -H "Authorization: Bearer ${ASTER_OWNER_TOKEN}" \
+    -H @<(printf 'Authorization: Bearer %s\n' "$token") \
     -H "Content-Type: application/json" \
     -w '\n' \
-    "$@"
+    "${args[@]}"

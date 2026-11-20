@@ -1,5 +1,13 @@
 # aster
 
-local-first Rust/PostgreSQL foundation with persistent identity, an initial regulatory snapshot, and a read-only owner API.
+aster learns and decides what aster is
+you help shape that process
 
-[GNU GPL v3](./LICENSE)
+uses no external APIs
+
+- see [/docs](./docs)
+
+![chat](.github/assets/chat.png)
+![mind](.github/assets/mind.png)
+
+[GPL v3](./LICENSE)

@@ -13,15 +13,19 @@ use aster_core::{Action, Actor, PermissionDecision, PermissionPolicy};
 use aster_storage::Store;
 use axum::{
     Json, Router,
-    extract::{Request, State},
-    http::{HeaderValue, StatusCode, header},
-    middleware::{self, Next},
+    extract::State,
+    http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
 
-use crate::auth::{OwnerToken, require_owner};
+use crate::{
+    auth::{Auth, OwnerToken, require_owner},
+    session::Sessions,
+    web,
+};
 
 /// Shared handler state. `runtime` is absent for inspection-only routers.
 #[derive(Clone)]
@@ -56,6 +60,18 @@ pub fn router_with_runtime(store: Store, token: OwnerToken, runtime: Arc<Runtime
 }
 
 fn build(store: Store, token: OwnerToken, runtime: Option<Arc<Runtime>>) -> Router {
+    // The dashboard follows live config; without a runtime it is off.
+    let sessions = match &runtime {
+        Some(runtime) => {
+            let config = runtime.config().clone();
+            Sessions::new(move || config.get().dashboard.clone())
+        }
+        None => Sessions::new(|| aster_runtime::DashboardSection {
+            enabled: false,
+            ..Default::default()
+        }),
+    };
+    let auth = Auth { token, sessions };
     let state = AppState {
         store,
         runtime: RuntimeSlot(runtime.clone()),
@@ -68,21 +84,14 @@ fn build(store: Store, token: OwnerToken, runtime: Option<Arc<Runtime>>) -> Rout
         .route("/v1/policy", get(policy))
         .merge(memory::router())
         .merge(runtime::router(runtime))
-        .route_layer(middleware::from_fn_with_state(token, require_owner));
+        .route_layer(middleware::from_fn_with_state(auth.clone(), require_owner));
 
     Router::new()
         .route("/health/live", get(live))
         .merge(private)
         .with_state(state)
-        .layer(middleware::from_fn(no_store))
-}
-
-async fn no_store(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+        .merge(web::router().with_state(auth))
+        .layer(middleware::from_fn(web::security_headers))
 }
 
 async fn live() -> Json<serde_json::Value> {
@@ -185,7 +194,10 @@ async fn policy() -> Json<serde_json::Value> {
 mod tests {
     use std::time::Duration;
 
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::Body,
+        http::{Request, header},
+    };
     use http_body_util::BodyExt;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# aster-set <section.key> <value>: change live configuration (validated by
+# Aster, written to aster.toml, applied without a restart where possible).
+#   aster-set cognition.engine '"neural"'      (TOML literal: strings quoted)
+#   aster-set runtime.tick_interval_ms 2000
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+[[ $# -eq 2 ]] || die "usage: aster-set <section.key> <toml value>"
+api PATCH /v1/config --data "{$(json_string "$1"): $(json_string "=$2")}"

@@ -57,9 +57,22 @@ The built-in pack is [`crates/aster-mind/packs/starter.aster`](../crates/aster-m
 
 How a reply is chosen (shown in the thought trace):
 
-1. Candidates come from taught associations, recalled memories and the n-gram model.
+1. Candidates come from taught associations, recalled memories, the n-gram model and, with the [neural](neural.md) engine, the network.
 2. Each gets a score. The best must beat a threshold that moves with the levels.
 3. If none does, Aster asks you instead.
+
+## steering
+
+Each reply's trace keeps every candidate Aster considered, including the ones that lost. Act on them from the dashboard ("Why?") or the console:
+
+| | console | effect |
+|---|---|---|
+| pick a better candidate | `/prefer 2` | it becomes the reply for this prompt; the one chosen before is weakened |
+| rate any candidate | `/rate 3 +` · `/rate 3 -` | strengthens or weakens that reply; a good rating on a new one teaches it |
+| a memory didn't fit | `/irrelevant 1` | that memory scores much lower for these words from now on |
+| try again | `/reconsider` | a different reply to the same message; nothing is learned until you rate or prefer |
+
+Picking a candidate counts as good feedback: Aster had the right answer, it just didn't choose it. Everything you do is recorded with the reply. The original reply is never changed.
 
 Snapshots (saved every `cognition.snapshot_every_updates` updates and on shutdown):
 

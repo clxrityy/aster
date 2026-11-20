@@ -61,9 +61,37 @@ pub struct Exchange<'a> {
     pub owner_turn_id: Uuid,
     pub mode: &'a str,
     pub owner_text: &'a str,
+    /// The earlier turn the owner is replying to, when threaded.
+    pub owner_reply_to: Option<Uuid>,
     pub aster_text: &'a str,
     pub trace: &'a ThoughtTrace,
     pub question: Option<&'a OutboundDraft>,
+    pub state: &'a RegulatoryState,
+}
+
+/// An Aster turn with the owner turn it replied to and its stored trace.
+#[derive(Debug, Clone)]
+pub struct StoredExchange {
+    pub owner: TurnRecord,
+    pub aster: TurnRecord,
+    pub trace: Value,
+}
+
+/// One owner steering signal on an Aster turn.
+pub struct TurnSignal<'a> {
+    pub turn_id: Uuid,
+    pub kind: &'a str,
+    pub candidate_index: Option<u32>,
+    pub rating: Option<i8>,
+    pub detail: Option<&'a str>,
+}
+
+/// A reconsidered reply: a new Aster turn for an existing owner turn.
+pub struct Reconsideration<'a> {
+    pub owner_turn_id: Uuid,
+    pub previous_aster_turn: Uuid,
+    pub aster_text: &'a str,
+    pub trace: &'a ThoughtTrace,
     pub state: &'a RegulatoryState,
 }
 
@@ -237,8 +265,8 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let identity_id = memory_identity(&mut tx).await?;
         let owner = sqlx::query_as::<_, TurnRow>(concat!(
-            "INSERT INTO aster_turns (id, identity_id, conversation_id, role, mode, text)
-             VALUES ($1, $2, $3, 'owner', $4, $5) RETURNING ",
+            "INSERT INTO aster_turns (id, identity_id, conversation_id, role, mode, text, reply_to)
+             VALUES ($1, $2, $3, 'owner', $4, $5, $6) RETURNING ",
             turn_columns!()
         ))
         .bind(exchange.owner_turn_id)
@@ -246,6 +274,7 @@ impl Store {
         .bind(exchange.conversation_id)
         .bind(exchange.mode)
         .bind(bounded(exchange.owner_text))
+        .bind(exchange.owner_reply_to)
         .fetch_one(&mut *tx)
         .await?;
         let aster = sqlx::query_as::<_, TurnRow>(concat!(
@@ -302,6 +331,108 @@ impl Store {
         Ok(rows.into_iter().map(turn).collect())
     }
 
+    pub async fn turn(&self, id: Uuid) -> Result<Option<TurnRecord>, StorageError> {
+        Ok(sqlx::query_as::<_, TurnRow>(concat!(
+            "SELECT ",
+            turn_columns!(),
+            " FROM aster_turns WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(turn))
+    }
+
+    /// The Aster turn `aster_turn`, its owner turn and its trace.
+    pub async fn exchange(&self, aster_turn: Uuid) -> Result<Option<StoredExchange>, StorageError> {
+        let Some(aster) = self.turn(aster_turn).await? else {
+            return Ok(None);
+        };
+        let (true, Some(owner_id)) = (aster.role == "aster", aster.reply_to) else {
+            return Ok(None);
+        };
+        let (Some(owner), Some(trace)) =
+            (self.turn(owner_id).await?, self.thought(aster_turn).await?)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(StoredExchange {
+            owner,
+            aster,
+            trace,
+        }))
+    }
+
+    pub async fn record_signal(&self, signal: &TurnSignal<'_>) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let identity_id = memory_identity(&mut tx).await?;
+        insert_signal(&mut tx, identity_id, signal).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Store a reconsidered reply as a new Aster turn (same owner turn), with
+    /// its trace, the signal on the earlier reply, levels and audit.
+    pub async fn record_reconsideration(
+        &self,
+        r: &Reconsideration<'_>,
+    ) -> Result<TurnRecord, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let identity_id = memory_identity(&mut tx).await?;
+        let aster = sqlx::query_as::<_, TurnRow>(concat!(
+            "INSERT INTO aster_turns (id, identity_id, conversation_id, role, mode, text, reply_to)
+             SELECT $1, $2, conversation_id, 'aster', mode, $3, id FROM aster_turns
+             WHERE id = $4 AND role = 'owner' RETURNING ",
+            turn_columns!()
+        ))
+        .bind(Uuid::new_v4())
+        .bind(identity_id)
+        .bind(bounded(r.aster_text))
+        .bind(r.owner_turn_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let aster = turn(aster);
+        sqlx::query("INSERT INTO aster_thoughts (turn_id, trace) VALUES ($1, $2)")
+            .bind(aster.id)
+            .bind(serde_json::to_value(r.trace)?)
+            .execute(&mut *tx)
+            .await?;
+        insert_signal(
+            &mut tx,
+            identity_id,
+            &TurnSignal {
+                turn_id: r.previous_aster_turn,
+                kind: "reconsider",
+                candidate_index: None,
+                rating: None,
+                detail: None,
+            },
+        )
+        .await?;
+        write_state(&mut tx, identity_id, r.state, "reconsider").await?;
+        audit(
+            &mut tx,
+            identity_id,
+            "reply_reconsidered",
+            serde_json::json!({ "owner_turn": r.owner_turn_id, "previous": r.previous_aster_turn, "aster_turn": aster.id }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(aster)
+    }
+
+    /// Signals recorded on an Aster turn, oldest first.
+    pub async fn turn_signals(&self, turn_id: Uuid) -> Result<Vec<Value>, StorageError> {
+        Ok(sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_build_object('kind', kind, 'candidate_index', candidate_index,
+                    'rating', rating, 'detail', detail, 'created_at', created_at)
+             FROM aster_turn_signals WHERE turn_id = $1 ORDER BY created_at, id",
+        )
+        .bind(turn_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn thought(&self, turn_id: Uuid) -> Result<Option<Value>, StorageError> {
         Ok(
             sqlx::query_scalar::<_, Value>("SELECT trace FROM aster_thoughts WHERE turn_id = $1")
@@ -311,7 +442,6 @@ impl Store {
         )
     }
 
-    /// Record a rating for an Aster turn. Returns false if no such Aster turn.
     /// Records feedback on an Aster turn. Returns the owner turn it replied to
     /// (the id cognition knows the exchange by), or `None` when `turn_id` is not
     /// an Aster turn.
@@ -567,6 +697,37 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+}
+
+async fn insert_signal(
+    connection: &mut PgConnection,
+    identity_id: Uuid,
+    signal: &TurnSignal<'_>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO aster_turn_signals (identity_id, turn_id, kind, candidate_index, rating, detail)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(identity_id)
+    .bind(signal.turn_id)
+    .bind(signal.kind)
+    .bind(signal.candidate_index.map(|i| i as i32))
+    .bind(signal.rating.map(|r| i16::from(r.signum())))
+    .bind(signal.detail.map(bounded))
+    .execute(&mut *connection)
+    .await?;
+    audit(
+        connection,
+        identity_id,
+        "turn_signal_recorded",
+        serde_json::json!({
+            "turn_id": signal.turn_id,
+            "kind": signal.kind,
+            "candidate_index": signal.candidate_index,
+            "rating": signal.rating,
+        }),
+    )
+    .await
 }
 
 #[cfg(test)]

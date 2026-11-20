@@ -1,6 +1,6 @@
 # console
 
-`aster console` is a client of `aster serve`. Closing it doesn't stop Aster.
+`aster console` is a client of `aster serve`. Closing it doesn't stop Aster. Prefer a browser? See [dashboard](dashboard.md). On a VPS: `bin/aster --remote you@vps console`.
 
 ```
  ✶ aster  chat  ● live  ✉ 1 waiting
@@ -22,6 +22,10 @@
 | `/train` · `/chat` | train mode asks you to rate each reply |
 | `+` · `-` · `/good` · `/bad` | rate the last reply |
 | `/correct <reply>` | rate it bad and teach the better reply |
+| `/prefer <n>` | use candidate *n* of the last reply instead (numbers as in the trace) |
+| `/rate <n> +` · `/rate <n> -` | rate one candidate of the last reply |
+| `/irrelevant <n>` | recalled item *n* didn't belong with that message |
+| `/reconsider` | ask for a different reply to your last message |
 | `/teach <prompt> => <reply>` | teach directly |
 | `/answer <n> <text>` | answer inbox item *n* |
 | `/approve <n>` · `/deny <n>` | decide a request |
@@ -31,7 +35,7 @@
 | `/pause` · `/resume` | freeze/resume levels and initiative |
 | `/status` · `/history` | mind stats · level changes |
 | `/snapshot [why]` · `/snapshots` · `/rollback <v>` | mind versions |
-| `/logs <category> [n]` | tail today's log |
+| `/logs <category> [n]` | newest entries of a log (read through the server) |
 | `/trace` or `Ctrl-T` · `/mouse` · `/clear` · `/help` · `/quit` | view |
 
 Keys: `↑/↓` input history, `Esc` clear, `Ctrl-C` quit.

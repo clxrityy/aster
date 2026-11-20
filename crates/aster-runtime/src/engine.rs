@@ -9,12 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aster_core::CandidateSource;
 use aster_core::{
     Cognition, LearnOutcome, LearningSignal, MemoryCursor, MemoryPageSize, MemoryRecord,
     OutboundDraft, OutboundStatus, RegulationEvent, RegulatoryState, RequestEffect, ThoughtTrace,
     TurnContext,
 };
-use aster_storage::{Exchange, OutboundRecord, SnapshotInfo, StorageError, Store, TurnRecord};
+use aster_storage::{
+    Exchange, OutboundRecord, Reconsideration, SnapshotInfo, StorageError, Store, StoredExchange,
+    TurnRecord, TurnSignal,
+};
 use chrono::Utc;
 use serde::Serialize;
 use thiserror::Error;
@@ -80,6 +84,22 @@ pub struct LearnResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct IngestFile {
+    pub path: String,
+    pub bytes: u64,
+    pub too_large: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingStatus {
+    pub engine: String,
+    /// Engines compiled into this build.
+    pub available: Vec<String>,
+    pub history: Vec<aster_core::TrainPoint>,
+    pub stats: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RuntimeStatus {
     pub engine: String,
     pub paused: bool,
@@ -104,7 +124,7 @@ pub struct Runtime {
     store: Store,
     config: ConfigHandle,
     bus: broadcast::Sender<Envelope>,
-    mind: tokio::sync::Mutex<Box<dyn Cognition>>,
+    mind: Arc<tokio::sync::Mutex<Box<dyn Cognition>>>,
     inner: Mutex<Inner>,
     stop: watch::Sender<bool>,
     log_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -147,7 +167,7 @@ impl Runtime {
             store,
             config: config.clone(),
             bus: bus.clone(),
-            mind: tokio::sync::Mutex::new(mind),
+            mind: Arc::new(tokio::sync::Mutex::new(mind)),
             inner: Mutex::new(Inner {
                 levels: levels.clone(),
                 persisted: levels,
@@ -299,7 +319,22 @@ impl Runtime {
     // ----- conversation -------------------------------------------------
 
     pub async fn chat(&self, text: &str, mode: Mode) -> Result<ChatResult, RuntimeError> {
+        self.reply(text, mode, None).await
+    }
+
+    /// A chat turn, optionally threaded as a reply to an earlier turn.
+    pub async fn reply(
+        &self,
+        text: &str,
+        mode: Mode,
+        reply_to: Option<Uuid>,
+    ) -> Result<ChatResult, RuntimeError> {
         let text = validate_text("text", text)?;
+        if let Some(id) = reply_to
+            && self.store.turn(id).await?.is_none()
+        {
+            return Err(RuntimeError::Invalid("reply_to is not a known turn".into()));
+        }
         let cfg = self.config.get();
         let turn_id = Uuid::new_v4();
         let (levels, conversation_id) = {
@@ -314,6 +349,7 @@ impl Runtime {
                 text: &text,
                 levels: &levels,
                 params: &cfg.cognition,
+                avoid: None,
             })
         };
         let levels = self.regulate(&response.events);
@@ -325,6 +361,7 @@ impl Runtime {
                 owner_turn_id: turn_id,
                 mode: mode.as_str(),
                 owner_text: &text,
+                owner_reply_to: reply_to,
                 aster_text: &response.text,
                 trace: &response.trace,
                 question: question.as_ref(),
@@ -371,6 +408,202 @@ impl Runtime {
             .thought(turn_id)
             .await?
             .ok_or(RuntimeError::NotFound)
+    }
+
+    // ----- steering -----------------------------------------------------
+
+    async fn stored(
+        &self,
+        aster_turn: Uuid,
+    ) -> Result<(StoredExchange, ThoughtTrace), RuntimeError> {
+        let exchange = self
+            .store
+            .exchange(aster_turn)
+            .await?
+            .ok_or(RuntimeError::NotFound)?;
+        let trace: ThoughtTrace = serde_json::from_value(exchange.trace.clone())
+            .map_err(|_| RuntimeError::Conflict("this turn's trace cannot be read".into()))?;
+        Ok((exchange, trace))
+    }
+
+    fn candidate(
+        trace: &ThoughtTrace,
+        index: usize,
+    ) -> Result<aster_core::Candidate, RuntimeError> {
+        let candidate = trace.candidates.get(index).cloned().ok_or_else(|| {
+            RuntimeError::Invalid(format!(
+                "candidate must be within 0..{}",
+                trace.candidates.len()
+            ))
+        })?;
+        if candidate.source == CandidateSource::Question {
+            return Err(RuntimeError::Invalid(
+                "a question is not a reply; answer it instead".into(),
+            ));
+        }
+        Ok(candidate)
+    }
+
+    /// The owner picked candidate `index` of an Aster turn as the best reply.
+    pub async fn prefer(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+    ) -> Result<LearnResult, RuntimeError> {
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let candidate = Self::candidate(&trace, index)?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "prefer",
+                candidate_index: Some(index as u32),
+                rating: None,
+                detail: Some(&candidate.text),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "prefer",
+                LearningSignal::Prefer {
+                    turn_id: exchange.owner.id,
+                    prompt: exchange.owner.text,
+                    text: candidate.text,
+                    source: candidate.source,
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// Rate one candidate of an Aster turn, chosen or not.
+    pub async fn rate_candidate(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+        rating: i8,
+    ) -> Result<LearnResult, RuntimeError> {
+        if rating == 0 {
+            return Err(RuntimeError::Invalid(
+                "rating must be good (+1) or bad (-1)".into(),
+            ));
+        }
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let candidate = Self::candidate(&trace, index)?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "rate",
+                candidate_index: Some(index as u32),
+                rating: Some(rating.signum()),
+                detail: Some(&candidate.text),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "rate_candidate",
+                LearningSignal::RateCandidate {
+                    prompt: exchange.owner.text,
+                    text: candidate.text,
+                    source: candidate.source,
+                    rating: rating.signum(),
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// A recalled document did not belong with this turn's prompt.
+    pub async fn mark_irrelevant(
+        &self,
+        aster_turn: Uuid,
+        index: usize,
+    ) -> Result<LearnResult, RuntimeError> {
+        let (exchange, trace) = self.stored(aster_turn).await?;
+        let recalled = trace.recalled.get(index).cloned().ok_or_else(|| {
+            RuntimeError::Invalid(format!(
+                "recalled item must be within 0..{}",
+                trace.recalled.len()
+            ))
+        })?;
+        self.store
+            .record_signal(&TurnSignal {
+                turn_id: aster_turn,
+                kind: "irrelevant",
+                candidate_index: Some(index as u32),
+                rating: None,
+                detail: Some(&recalled.source),
+            })
+            .await?;
+        let (outcome, levels) = self
+            .learn(
+                "irrelevant",
+                LearningSignal::Irrelevant {
+                    prompt: exchange.owner.text,
+                    document: recalled.source,
+                },
+            )
+            .await?;
+        Ok(LearnResult {
+            note: outcome.note,
+            levels,
+        })
+    }
+
+    /// Ask Aster for a different reply to the same owner turn. The new reply is
+    /// a new Aster turn; nothing is learned until the owner rates or prefers.
+    pub async fn reconsider(&self, aster_turn: Uuid) -> Result<ChatResult, RuntimeError> {
+        let (exchange, _) = self.stored(aster_turn).await?;
+        let cfg = self.config.get();
+        let levels = self.levels();
+        let response = {
+            let mut mind = self.mind.lock().await;
+            mind.respond(&TurnContext {
+                turn_id: exchange.owner.id,
+                text: &exchange.owner.text,
+                levels: &levels,
+                params: &cfg.cognition,
+                avoid: Some(&exchange.aster.text),
+            })
+        };
+        let aster = self
+            .store
+            .record_reconsideration(&Reconsideration {
+                owner_turn_id: exchange.owner.id,
+                previous_aster_turn: aster_turn,
+                aster_text: &response.text,
+                trace: &response.trace,
+                state: &levels,
+            })
+            .await?;
+        self.inner().last_activity = Instant::now();
+        self.emit(Event::Turn {
+            turn: aster.clone(),
+        });
+        self.emit(Event::Thought {
+            turn_id: aster.id,
+            trace: Box::new(response.trace.clone()),
+        });
+        self.after_updates(1).await;
+        Ok(ChatResult {
+            owner: exchange.owner,
+            aster,
+            trace: response.trace,
+            outbound: None,
+            levels,
+        })
+    }
+
+    pub async fn turn_signals(
+        &self,
+        aster_turn: Uuid,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        Ok(self.store.turn_signals(aster_turn).await?)
     }
 
     // ----- learning -----------------------------------------------------
@@ -502,6 +735,88 @@ impl Runtime {
             note: outcome.note,
             levels,
         })
+    }
+
+    /// Files the owner could ingest: regular files inside `server.ingest_dir`
+    /// (two levels deep), with sizes, sorted by path.
+    pub async fn ingest_files(&self) -> Result<Vec<IngestFile>, RuntimeError> {
+        let server = self.config.get().server.clone();
+        let root = PathBuf::from(&server.ingest_dir);
+        let max = server.ingest_max_bytes;
+        tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            let Ok(root) = root.canonicalize() else {
+                return files;
+            };
+            let mut stack = vec![(root.clone(), 0)];
+            while let Some((dir, depth)) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    // symlink_metadata: never follow links out of the folder.
+                    let Ok(meta) = entry.path().symlink_metadata() else {
+                        continue;
+                    };
+                    let path = entry.path();
+                    if meta.is_dir() && depth < 1 {
+                        stack.push((path, depth + 1));
+                    } else if meta.is_file()
+                        && let Ok(relative) = path.strip_prefix(&root)
+                        && let Some(relative) = relative.to_str()
+                        && !relative.split('/').any(|p| p.starts_with('.'))
+                    {
+                        files.push(IngestFile {
+                            path: relative.to_string(),
+                            bytes: meta.len(),
+                            too_large: meta.len() > max,
+                        });
+                    }
+                }
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            files.truncate(500);
+            files
+        })
+        .await
+        .map_err(|_| RuntimeError::Invalid("could not list the ingest folder".into()))
+    }
+
+    /// The newest `limit` entries of a log category (today's file, else the
+    /// latest day that has one), oldest first.
+    pub async fn log_tail(
+        &self,
+        category: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if !crate::config::LOG_CATEGORIES.contains(&category) {
+            return Err(RuntimeError::Invalid(format!(
+                "category must be one of {}",
+                crate::config::LOG_CATEGORIES.join(", ")
+            )));
+        }
+        let dir = PathBuf::from(&self.config.get().logs.dir).join(category);
+        let limit = limit.clamp(1, 1000);
+        tokio::task::spawn_blocking(move || {
+            let newest = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+                .max();
+            let Some(file) = newest else {
+                return Vec::new();
+            };
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(limit)..]
+                .iter()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        })
+        .await
+        .map_err(|_| RuntimeError::Invalid("could not read the log".into()))
     }
 
     /// Called after the owner creates a memory through the memory API.
@@ -730,6 +1045,61 @@ impl Runtime {
         self.snapshot(&format!("rollback to v{version}")).await
     }
 
+    /// The engine's recent training curve (empty for untrained engines).
+    pub async fn training(&self) -> TrainingStatus {
+        let mind = self.mind.lock().await;
+        TrainingStatus {
+            engine: mind.engine().to_string(),
+            available: aster_mind::available_engines()
+                .iter()
+                .map(|e| e.to_string())
+                .collect(),
+            history: mind.training_history(),
+            stats: mind.stats(),
+        }
+    }
+
+    /// Rebuild the mind when `cognition.engine` changed: snapshot what Aster
+    /// knows, then restore it into the configured engine.
+    async fn follow_engine(&self) -> Result<(), RuntimeError> {
+        let params = self.config.get().cognition.clone();
+        let from = {
+            let mut mind = self.mind.lock().await;
+            if mind.engine() == params.engine {
+                return Ok(());
+            }
+            let bytes = mind.snapshot().map_err(|_| RuntimeError::Snapshot)?;
+            let rebuilt =
+                aster_mind::build(&params, Some(&bytes)).map_err(|_| RuntimeError::Snapshot)?;
+            std::mem::replace(&mut *mind, rebuilt).engine()
+        };
+        self.emit(Event::Runtime {
+            message: format!("cognition engine switched from {from} to {}", params.engine),
+            paused: self.config.get().runtime.paused,
+        });
+        self.snapshot(&format!("engine switched to {}", params.engine))
+            .await?;
+        Ok(())
+    }
+
+    /// One bounded background training slice on a blocking thread.
+    async fn train(&self) {
+        let params = self.config.get().cognition.clone();
+        let budget = Duration::from_millis(params.neural.max_train_ms_per_tick);
+        let mut mind = self.mind.clone().lock_owned().await;
+        let report = tokio::task::spawn_blocking(move || mind.train(&params, budget)).await;
+        match report {
+            Ok(Some(report)) if report.steps > 0 => self.emit(Event::Trained {
+                steps: report.steps,
+                total_steps: report.total_steps,
+                loss: report.loss,
+                corpus_bytes: report.corpus_bytes,
+            }),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "training task failed"),
+        }
+    }
+
     // ----- ticking ------------------------------------------------------
 
     fn spawn_ticker(self: Arc<Self>) {
@@ -785,6 +1155,10 @@ impl Runtime {
         if changed {
             self.persist_levels(if resting { "rest" } else { "decay" })
                 .await?;
+        }
+        self.follow_engine().await?;
+        if !resting {
+            self.train().await;
         }
         if resting || idle < Duration::from_secs(cfg.runtime.idle_before_initiative_secs) {
             return Ok(());

@@ -139,6 +139,10 @@ pub const HELP: &[&str] = &[
     "  /train  /chat               switch mode (train asks you to rate each reply)",
     "  /good  /bad  /correct <t>   rate the last reply (in train mode: + or -)",
     "  /teach <prompt> => <reply>  teach a reply directly",
+    "  /prefer <n>                 use candidate n of the last reply instead (see trace)",
+    "  /rate <n> + | -             rate candidate n of the last reply",
+    "  /irrelevant <n>             recalled item n did not belong with that prompt",
+    "  /reconsider                 ask for a different reply to your last message",
     "  /answer <n> <text>          answer inbox item n",
     "  /approve <n>  /deny <n>     decide on request n",
     "  /remember <text>            store a memory     /forget <memory-id>",
@@ -148,7 +152,7 @@ pub const HELP: &[&str] = &[
     "  /pause  /resume             freeze or resume regulation and initiative",
     "  /status  /history           mind statistics / recent level changes",
     "  /snapshot [reason]  /snapshots  /rollback <version>",
-    "  /logs <category> [n]        tail today's JSONL log (conversations, thoughts, levels, …)",
+    "  /logs <category> [n]        tail the newest JSONL log (conversations, thoughts, levels, …)",
     "  /trace (Ctrl-T)             toggle the thought-trace panel",
     "  /mouse                      toggle mouse scrolling (off lets you select text)",
     "  /clear  /help  /quit",
@@ -679,6 +683,52 @@ impl App {
         );
     }
 
+    /// Steering commands on the last Aster reply (numbers as in the trace panel).
+    fn steer(&mut self, name: &str, rest: &str) {
+        let Some(turn_id) = self.last_aster_turn.clone() else {
+            self.error("no reply to steer yet");
+            return;
+        };
+        let mut words = rest.split_whitespace();
+        let index = words
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(1));
+        let (path, body, done) = match (name, index, words.next()) {
+            ("reconsider", _, _) => {
+                self.status = "Aster is reconsidering…".into();
+                self.spawn(move |client| async move {
+                    let path = format!("/v1/turns/{turn_id}/reconsider");
+                    match client.post(&path, json!({})).await {
+                        Ok(result) => Msg::Chat(result),
+                        Err(error) => Msg::Notice(error, true),
+                    }
+                });
+                return;
+            }
+            ("prefer", Some(i), None) => (
+                format!("/v1/turns/{turn_id}/prefer"),
+                json!({ "candidate": i }),
+                "preferred",
+            ),
+            ("rate", Some(i), Some(sign @ ("+" | "-"))) => (
+                format!("/v1/turns/{turn_id}/candidates/{i}/rate"),
+                json!({ "rating": if sign == "+" { 1 } else { -1 } }),
+                "candidate rated",
+            ),
+            ("irrelevant", Some(i), None) => (
+                format!("/v1/turns/{turn_id}/recalled/{i}/irrelevant"),
+                json!({}),
+                "marked irrelevant",
+            ),
+            _ => {
+                self.error("usage: /prefer <n> · /rate <n> + | - · /irrelevant <n> · /reconsider");
+                return;
+            }
+        };
+        self.call(Method::POST, path, Some(body), done);
+    }
+
     fn submit(&mut self, line: &str) {
         if self.awaiting_rating && (line == "+" || line == "-") {
             self.rate(if line == "+" { 1 } else { -1 }, None);
@@ -732,6 +782,7 @@ impl App {
                     "mouse off: drag to select and copy text; /mouse turns scrolling back on"
                 });
             }
+            "prefer" | "rate" | "irrelevant" | "reconsider" => self.steer(name, rest),
             "good" => self.rate(1, None),
             "bad" => self.rate(-1, None),
             "correct" if !rest.is_empty() => self.rate(-1, Some(rest.to_string())),
@@ -952,39 +1003,22 @@ impl App {
     }
 }
 
-/// Read the tail of today's local log file for `category`.
+/// The tail of the newest log file for `category`, read through the server
+/// (so it works against a remote Aster too).
 async fn tail_log(client: Client, category: String, count: usize) -> Msg {
-    let dir = match client.get("/v1/config").await {
-        Ok(value) => value["config"]["logs"]["dir"]
-            .as_str()
-            .unwrap_or("data/logs")
-            .to_string(),
-        Err(error) => return Msg::Notice(error, true),
-    };
-    // Files are named by date, so the lexically last one is the newest.
-    let today = latest_file(&format!("{dir}/{category}"));
-    let Some(path) = today else {
-        return Msg::Notice(format!("no log files under {dir}/{category}"), true);
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(count);
-            let mut out = vec![format!("── {path} (last {}) ──", lines.len() - start)];
-            out.extend(lines[start..].iter().map(|l| short(l, 200)));
+    match client
+        .get(&format!("/v1/logs/{category}?limit={count}"))
+        .await
+    {
+        Ok(Value::Array(entries)) if entries.is_empty() => {
+            Msg::Notice(format!("no {category} log entries yet"), true)
+        }
+        Ok(Value::Array(entries)) => {
+            let mut out = vec![format!("── {category} (last {}) ──", entries.len())];
+            out.extend(entries.iter().map(|e| short(&e.to_string(), 200)));
             Msg::Print(out)
         }
-        Err(_) => Msg::Notice(format!("cannot read {path}"), true),
+        Ok(_) => Msg::Notice("unexpected log response".into(), true),
+        Err(error) => Msg::Notice(error, true),
     }
-}
-
-fn latest_file(dir: &str) -> Option<String> {
-    let mut files: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().display().to_string())
-        .filter(|p| p.ends_with(".jsonl"))
-        .collect();
-    files.sort();
-    files.pop()
 }

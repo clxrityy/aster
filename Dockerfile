@@ -4,7 +4,10 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
-RUN cargo build --locked --release -p aster-api
+# "neural" adds the self-trained byte-level engine (candle, CPU only); set
+# FEATURES="" for a smaller statistical-only build.
+ARG FEATURES=neural
+RUN cargo build --locked --release -p aster-api --features "$FEATURES"
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
 RUN apt-get update \

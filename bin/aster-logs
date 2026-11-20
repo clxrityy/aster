@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# aster-logs [service]             follow container logs (default: aster)
+# aster-logs <category> [count]    Aster's JSONL log via the API
+#   categories: conversations thoughts levels memories requests config runtime training
+# shellcheck source=bin/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+
+target="${1:-aster}"
+case "$target" in
+    conversations | thoughts | levels | memories | requests | config | runtime | training)
+        api GET "/v1/logs/$target?limit=${2:-20}"
+        ;;
+    *)
+        shift || true
+        compose logs -f "$target" "$@"
+        ;;
+esac
