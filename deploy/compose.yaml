@@ -9,7 +9,7 @@
 # Set up with deploy/setup.sh; day to day use bin/aster-up, aster-logs, …
 # Secrets live in deploy/.env (chmod 600), never in this file.
 
-name: aster
+name: aster-deploy
 
 services:
   db:

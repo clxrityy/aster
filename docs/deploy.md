@@ -79,7 +79,7 @@ deploy/data/ingest/       files to ingest (copy with scp)
 deploy/backups/           aster-backup output (700)
 ```
 
-The database lives in the `aster_postgres_data` podman volume. `aster-down` keeps it. It refuses `-v`.
+The database lives in the `aster-deploy_postgres_data` podman volume. `aster-down` keeps it. It refuses `-v`.
 
 ## when something's off
 
