@@ -55,17 +55,47 @@ pub struct Sample {
 }
 
 impl ByteModel {
-    pub fn new(shape: Shape) -> candle_core::Result<Self> {
+    /// A fresh network. Weights are drawn from `rng` (candle's own CPU
+    /// generator cannot be seeded), so a seeded mind starts from the same
+    /// weights every time.
+    pub fn new(shape: Shape, rng: &mut Rng) -> candle_core::Result<Self> {
         let device = Device::Cpu;
-        let varmap = VarMap::new();
+        let mut varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
         let embedding = embedding(VOCAB, shape.embed_dim, vb.pp("embedding"))?;
-        let hidden = linear(
-            shape.embed_dim * shape.context,
-            shape.hidden,
-            vb.pp("hidden"),
-        )?;
+        let flat = shape.embed_dim * shape.context;
+        let hidden = linear(flat, shape.hidden, vb.pp("hidden"))?;
         let output = linear(shape.hidden, VOCAB, vb.pp("output"))?;
+        // Same distributions candle uses: N(0, 1) embeddings, Kaiming-normal
+        // weights, U(±1/√fan_in) biases. Fixed order, so draws are reproducible.
+        let normal = |rng: &mut Rng, stdev: f64| {
+            let u1 = 1.0 - rng.next_f64();
+            let u2 = rng.next_f64();
+            ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos() * stdev) as f32
+        };
+        let uniform = |rng: &mut Rng, bound: f64| ((rng.next_f64() * 2.0 - 1.0) * bound) as f32;
+        for (name, rows, fan_in, bias) in [
+            ("embedding.weight", VOCAB, shape.embed_dim, false),
+            ("hidden.weight", shape.hidden, flat, false),
+            ("hidden.bias", shape.hidden, flat, true),
+            ("output.weight", VOCAB, shape.hidden, false),
+            ("output.bias", VOCAB, shape.hidden, true),
+        ] {
+            let tensor = if bias {
+                let bound = 1.0 / (fan_in as f64).sqrt();
+                let values = (0..rows).map(|_| uniform(rng, bound)).collect();
+                Tensor::from_vec(values, rows, &device)?
+            } else {
+                let stdev = if name == "embedding.weight" {
+                    1.0
+                } else {
+                    std::f64::consts::SQRT_2 / (fan_in as f64).sqrt()
+                };
+                let values = (0..rows * fan_in).map(|_| normal(rng, stdev)).collect();
+                Tensor::from_vec(values, (rows, fan_in), &device)?
+            };
+            varmap.set_one(name, tensor)?;
+        }
         Ok(Self {
             shape,
             embedding,
@@ -254,7 +284,8 @@ impl ByteModel {
         if header.format != FORMAT {
             return Err(bad());
         }
-        let mut model = Self::new(header.shape)?;
+        // Every weight is overwritten from the blob below.
+        let mut model = Self::new(header.shape, &mut Rng::new(Some(0)))?;
         let mut offset = 8 + len;
         let mut loaded = HashMap::new();
         for (name, dims) in &header.tensors {
@@ -310,8 +341,8 @@ mod tests {
     #[test]
     fn loss_decreases_and_learns_a_pair() {
         let corpus = "hello\thi there\n".repeat(30);
-        let mut model = ByteModel::new(shape()).unwrap();
         let mut rng = Rng::new(Some(1));
+        let mut model = ByteModel::new(shape(), &mut rng).unwrap();
         let early = model
             .train(corpus.as_bytes(), 5, 32, 0.01, &mut rng)
             .unwrap();
@@ -330,8 +361,8 @@ mod tests {
     #[test]
     fn bytes_round_trip_and_reject_garbage() {
         let corpus = "aster learns bytes\n".repeat(10);
-        let mut model = ByteModel::new(shape()).unwrap();
         let mut rng = Rng::new(Some(2));
+        let mut model = ByteModel::new(shape(), &mut rng).unwrap();
         model
             .train(corpus.as_bytes(), 20, 16, 0.01, &mut rng)
             .unwrap();
@@ -351,11 +382,21 @@ mod tests {
     }
 
     #[test]
+    fn same_seed_same_starting_weights() {
+        let a = ByteModel::new(shape(), &mut Rng::new(Some(4))).unwrap();
+        let b = ByteModel::new(shape(), &mut Rng::new(Some(4))).unwrap();
+        let c = ByteModel::new(shape(), &mut Rng::new(Some(5))).unwrap();
+        assert_eq!(a.to_bytes().unwrap(), b.to_bytes().unwrap());
+        assert_ne!(a.to_bytes().unwrap(), c.to_bytes().unwrap());
+    }
+
+    #[test]
     fn non_ascii_bytes_are_in_vocabulary() {
         let corpus = "café → ☕\n".repeat(20);
-        let mut model = ByteModel::new(shape()).unwrap();
+        let mut rng = Rng::new(Some(3));
+        let mut model = ByteModel::new(shape(), &mut rng).unwrap();
         let loss = model
-            .train(corpus.as_bytes(), 50, 16, 0.01, &mut Rng::new(Some(3)))
+            .train(corpus.as_bytes(), 50, 16, 0.01, &mut rng)
             .unwrap();
         assert!(loss.is_finite());
     }
