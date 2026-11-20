@@ -21,6 +21,10 @@ Sign in with your owner token (`aster-token show`). The browser keeps only a ses
 | Snapshots | save, list, roll back |
 | Logs | newest entries of each log category |
 
+Live updates (levels arrive every tick) patch the page in place, so a half-typed message or correction is never cleared. A correction draft is kept if you open another one and come back; Esc or Cancel discards it. Messages appear as soon as you send them, and ratings as soon as you click.
+
+The translucent panels follow the system light or dark setting. With "reduce transparency" or "reduce motion" turned on, they become solid and stop animating.
+
 ## steering a reply
 
 "Why?" on any reply shows every candidate Aster considered, with its score and source. From there:

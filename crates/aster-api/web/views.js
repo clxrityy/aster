@@ -125,18 +125,39 @@ function hot(name, value) {
   return ((name === 'stress' || name === 'cognitive_load') && value > 60) || (name === 'energy' && value < 25);
 }
 
+function levelRow(name, levels, history) {
+  const value = Number(levels?.[name] ?? 0);
+  const past = history[name] || [];
+  const prev = past.length > 1 ? past[past.length - 2] : value;
+  const trend = value - prev > 0.05 ? '↑' : prev - value > 0.05 ? '↓' : '';
+  return {
+    value, past, hot: hot(name, value), width: `${Math.max(0, Math.min(100, value))}%`,
+    num: `${Math.round(value)}${trend}`, title: `${label(name)}: ${fixed(value, 1)}`,
+  };
+}
+
 export function levelBars(levels, history) {
   return h('div.levels', LEVELS.map((name) => {
-    const value = Number(levels?.[name] ?? 0);
-    const past = history[name] || [];
-    const prev = past.length > 1 ? past[past.length - 2] : value;
-    const trend = value - prev > 0.05 ? '↑' : prev - value > 0.05 ? '↓' : '';
-    return h('div.level', { title: `${label(name)}: ${fixed(value, 1)}` },
+    const row = levelRow(name, levels, history);
+    return h('div.level', { title: row.title, 'data-level': name },
       h('span', label(name)),
-      h(`div.bar${hot(name, value) ? '.hot' : ''}`, h('i', { style: `width:${Math.max(0, Math.min(100, value))}%` })),
-      h('span.num', `${Math.round(value)}${trend}`),
-      sparkline(past));
+      h(`div.bar${row.hot ? '.hot' : ''}`, h('i', { style: `width:${row.width}` })),
+      h('span.num', row.num),
+      sparkline(row.past));
   }));
+}
+
+/** Update bars made by levelBars in place, so widths animate instead of the DOM being rebuilt. */
+export function refreshLevelBars(el, levels, history) {
+  for (const rowEl of el.querySelectorAll('.level[data-level]')) {
+    const row = levelRow(rowEl.dataset.level, levels, history);
+    rowEl.title = row.title;
+    const bar = rowEl.querySelector('.bar');
+    bar.classList.toggle('hot', row.hot);
+    bar.firstElementChild.style.width = row.width;
+    rowEl.querySelector('.num').textContent = row.num;
+    rowEl.querySelector('svg.spark')?.replaceWith(sparkline(row.past));
+  }
 }
 
 /** The thought-trace inspector with steering controls. */

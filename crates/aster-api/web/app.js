@@ -1,7 +1,7 @@
 // Aster dashboard: state, live events, and pages.
 import { ApiError, del, get, patch, post, setCsrf, stream, whenUnauthorized } from './api.js';
 import {
-  LEVELS, SERIES_COLORS, append, bytes, fill, fixed, h, inspector, label, levelBars, lineChart, time, when,
+  LEVELS, SERIES_COLORS, append, bytes, fill, fixed, h, inspector, label, levelBars, lineChart, refreshLevelBars, time, when,
 } from './views.js';
 
 const PAGES = [
@@ -34,6 +34,7 @@ const state = {
   runtime: {},
   mode: 'chat',
   replyTo: null,
+  pending: [],
   training: [],
   stopStream: null,
 };
@@ -53,7 +54,10 @@ function toast(message, bad = false) {
   }
   const el = h(`div.toast${bad ? '.bad' : ''}`, message);
   box.append(el);
-  setTimeout(() => el.remove(), bad ? 6000 : 3000);
+  setTimeout(() => {
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 200);
+  }, bad ? 6000 : 3000);
 }
 
 async function attempt(fn, done) {
@@ -160,7 +164,7 @@ function onEvent(event) {
       break;
     case 'levels':
       pushLevels(event.state);
-      if (state.page === 'talk' || state.page === 'mind') render();
+      updateLevels();
       break;
     case 'outbound':
       upsertInbox(event.item);
@@ -169,6 +173,7 @@ function onEvent(event) {
       }
       renderChrome();
       if (state.page === 'inbox') render();
+      else renderTalk();
       break;
     case 'trained':
       state.training.push({ step: event.total_steps, loss: event.loss });
@@ -285,76 +290,100 @@ function render() {
 }
 
 // ----- talk -----------------------------------------------------------------
+//
+// The Talk page is mounted once and then patched: messages are kept by turn
+// id and only rebuilt when something about them changes, and the composer and
+// correction boxes are never rebuilt. Live events (levels arrive every tick)
+// therefore never wipe what you are typing or steal focus.
 
-let composer;
-let transcriptEl;
-
-function buildComposer() {
-  const text = h('textarea', {
-    rows: 2,
-    placeholder: 'Talk to Aster…  (Enter sends, Shift+Enter for a new line)',
-    'aria-label': 'Message',
-    onkeydown: (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        send();
-      }
-    },
-  });
-  const send = async () => {
-    const value = text.value.trim();
-    if (!value) return;
-    text.value = '';
-    const body = { text: value, mode: state.mode };
-    if (state.replyTo) body.reply_to = state.replyTo;
-    state.replyTo = null;
-    const result = await attempt(() => post('/v1/chat', body));
-    if (!result) {
-      text.value = value;
-      return;
-    }
-    addTurn(result.owner);
-    addTurn(result.aster);
-    state.traces.set(result.aster.id, result.trace);
-    if (result.outbound) upsertInbox(result.outbound);
-    pushLevels(result.levels);
-    if (state.selected) state.selected = result.aster.id;
-    renderTalk();
-  };
-  const holder = h('div.composer');
-  composer = { el: holder, text, send };
-  return composer;
-}
+const talk = {
+  el: null,
+  transcript: null,
+  inspector: null,
+  levels: null,
+  inbox: null,
+  composer: null,
+  typing: null,
+  empty: null,
+  nodes: new Map(),
+  mounted: false,
+  forceStick: false,
+};
+/** Correction forms by turn id. Kept, so a half-typed correction survives updates. */
+const correctionForms = new Map();
 
 function aster(turn) {
   return turn.role === 'aster';
+}
+
+function isReconsidered(turn) {
+  return aster(turn) && state.turns.some((t) => aster(t) && t.reply_to === turn.reply_to && t.id !== turn.id
+    && t.created_at < turn.created_at);
+}
+
+/** Everything a message's DOM depends on. Same key, same element. */
+function messageKey(turn) {
+  return [turn.text, state.ratings.get(turn.id) || 0, state.selected === turn.id, state.correcting === turn.id,
+    isReconsidered(turn), turn.reply_to || ''].join('\u0000');
+}
+
+function closeCorrection(id) {
+  correctionForms.delete(id);
+  if (state.correcting === id) state.correcting = null;
+  renderTalk();
+}
+
+function openCorrection(id) {
+  state.correcting = id;
+  renderTalk();
+  correctionForms.get(id)?.querySelector('input')?.focus();
+}
+
+function correctionForm(turn) {
+  const existing = correctionForms.get(turn.id);
+  if (existing) return existing;
+  const input = h('input.grow', {
+    type: 'text', name: 'correction', placeholder: 'What should Aster have said?', 'aria-label': 'Correction',
+    autocomplete: 'off',
+    onkeydown: (event) => { if (event.key === 'Escape') closeCorrection(turn.id); },
+  });
+  const submit = h('button.btn.small.primary', { type: 'submit' }, 'Teach');
+  const form = h('form.row.correction', {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value || submit.disabled) return;
+      submit.disabled = true;
+      form.classList.add('busy');
+      const result = await attempt(() => post('/v1/feedback', { turn_id: turn.id, rating: -1, correction: value }), 'correction learned');
+      submit.disabled = false;
+      form.classList.remove('busy');
+      if (result !== undefined) {
+        state.ratings.set(turn.id, -1);
+        closeCorrection(turn.id);
+      }
+    },
+  }, input, submit,
+  h('button.btn.small.ghost', { type: 'button', onclick: () => closeCorrection(turn.id) }, 'Cancel'));
+  correctionForms.set(turn.id, form);
+  return form;
 }
 
 function messageView(turn) {
   const rating = state.ratings.get(turn.id);
   const parent = turn.reply_to && state.turns.find((t) => t.id === turn.reply_to);
   const threaded = turn.role === 'owner' && parent && parent.role === 'aster';
-  const reconsidered = aster(turn) && state.turns.some((t) => aster(t) && t.reply_to === turn.reply_to && t.id !== turn.id
-    && t.created_at < turn.created_at);
-  const correcting = state.correcting === turn.id;
-  const correction = correcting && h('form.row', {
-    onsubmit: async (event) => {
-      event.preventDefault();
-      const value = event.target.elements.correction.value.trim();
-      if (!value) return;
-      if (await attempt(() => post('/v1/feedback', { turn_id: turn.id, rating: -1, correction: value }), 'correction learned') !== undefined) {
-        state.ratings.set(turn.id, -1);
-        state.correcting = null;
-        renderTalk();
-      }
-    },
-  }, h('input.grow', { type: 'text', name: 'correction', placeholder: 'What should Aster have said?', 'aria-label': 'Correction' }),
-  h('button.btn.small.primary', { type: 'submit' }, 'Teach'),
-  h('button.btn.small.ghost', { type: 'button', onclick: () => { state.correcting = null; renderTalk(); } }, 'Cancel'));
+  const reconsidered = isReconsidered(turn);
 
+  // Optimistic: the mark shows at once and is taken back if the server refuses.
   const rate = async (value) => {
-    if (await attempt(() => post('/v1/feedback', { turn_id: turn.id, rating: value }), value > 0 ? 'thanks' : 'noted') !== undefined) {
-      state.ratings.set(turn.id, value);
+    const before = state.ratings.get(turn.id);
+    state.ratings.set(turn.id, value);
+    renderTalk();
+    const result = await attempt(() => post('/v1/feedback', { turn_id: turn.id, rating: value }), value > 0 ? 'thanks' : 'noted');
+    if (result === undefined) {
+      if (before === undefined) state.ratings.delete(turn.id);
+      else state.ratings.set(turn.id, before);
       renderTalk();
     }
   };
@@ -370,12 +399,157 @@ function messageView(turn) {
       rating && h(`span.${rating > 0 ? 'rated-up' : 'rated-down'}`, rating > 0 ? '▲' : '▼')),
     h('div.text', turn.text),
     aster(turn) && h('div.actions',
-      h('button.btn.small.ghost.good', { onclick: () => rate(1), title: 'Good reply', 'aria-label': 'Good reply' }, '▲'),
-      h('button.btn.small.ghost.bad', { onclick: () => rate(-1), title: 'Poor reply', 'aria-label': 'Poor reply' }, '▼'),
-      h('button.btn.small.ghost', { onclick: () => { state.correcting = turn.id; renderTalk(); } }, 'Correct'),
-      h('button.btn.small.ghost', { onclick: () => { state.replyTo = turn.id; renderTalk(); composer?.text.focus(); } }, 'Reply'),
+      h(`button.btn.small.ghost.good${rating > 0 ? '.on' : ''}`, { onclick: () => rate(1), title: 'Good reply', 'aria-label': 'Good reply' }, '▲'),
+      h(`button.btn.small.ghost.bad${rating < 0 ? '.on' : ''}`, { onclick: () => rate(-1), title: 'Poor reply', 'aria-label': 'Poor reply' }, '▼'),
+      h('button.btn.small.ghost', { onclick: () => openCorrection(turn.id) }, 'Correct'),
+      h('button.btn.small.ghost', { onclick: () => { state.replyTo = turn.id; renderTalk(); talk.composer?.text.focus(); } }, 'Reply'),
       h('button.btn.small.ghost', { onclick: () => select(turn.id) }, state.selected === turn.id ? 'Hide why' : 'Why?')),
-    correction);
+    state.correcting === turn.id && correctionForm(turn));
+}
+
+function buildComposer() {
+  const resize = () => {
+    text.style.height = 'auto';
+    text.style.height = `${Math.min(text.scrollHeight, 200)}px`;
+  };
+  const text = h('textarea', {
+    rows: 1,
+    placeholder: 'Talk to Aster…  (Enter sends, Shift+Enter for a new line)',
+    'aria-label': 'Message',
+    oninput: resize,
+    onkeydown: (event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        send();
+      }
+    },
+  });
+  const send = async () => {
+    const value = text.value.trim();
+    if (!value) return;
+    text.value = '';
+    resize();
+    const body = { text: value, mode: state.mode };
+    if (state.replyTo) body.reply_to = state.replyTo;
+    state.replyTo = null;
+    // Show the message right away; the reply replaces the typing dots.
+    const pending = h('div.msg.owner.pending', h('div.meta', h('span', 'You'), h('span', 'sending…')), h('div.text', value));
+    state.pending.push(pending);
+    talk.forceStick = true;
+    renderTalk();
+    const result = await attempt(() => post('/v1/chat', body));
+    state.pending = state.pending.filter((p) => p !== pending);
+    if (!result) {
+      if (!text.value) { text.value = value; resize(); }
+      renderTalk();
+      return;
+    }
+    addTurn(result.owner);
+    addTurn(result.aster);
+    state.traces.set(result.aster.id, result.trace);
+    if (result.outbound) upsertInbox(result.outbound);
+    pushLevels(result.levels);
+    updateLevels();
+    if (state.selected) state.selected = result.aster.id;
+    talk.forceStick = true;
+    renderTalk();
+  };
+  const chat = h('button', { onclick: () => { state.mode = 'chat'; refreshComposer(); } }, 'Chat');
+  const train = h('button', { onclick: () => { state.mode = 'train'; refreshComposer(); }, title: 'Rate each reply as you go' }, 'Train');
+  const replying = h('span.reply-slot');
+  const hint = h('span.small.muted', 'Rate each reply ▲ / ▼ or correct it.');
+  const el = h('div.composer',
+    h('div.row', h('div.toggle', { role: 'group', 'aria-label': 'Mode' }, chat, train), replying, h('span.grow'), hint),
+    h('div.row.send-row', text, h('button.btn.primary.send', { onclick: () => send(), 'aria-label': 'Send' }, 'Send')));
+  return { el, text, chat, train, replying, hint };
+}
+
+function refreshComposer() {
+  const c = talk.composer;
+  c.chat.classList.toggle('on', state.mode === 'chat');
+  c.train.classList.toggle('on', state.mode === 'train');
+  c.hint.classList.toggle('hidden', state.mode !== 'train');
+  const replying = state.replyTo && state.turns.find((t) => t.id === state.replyTo);
+  fill(c.replying, replying && h('span.chip', `↪ replying to: ${replying.text.slice(0, 48)}`,
+    h('button.btn.small.ghost', { onclick: () => { state.replyTo = null; refreshComposer(); }, 'aria-label': 'Cancel reply' }, '✕')));
+}
+
+function mountTalk() {
+  if (talk.el?.isConnected) return;
+  talk.composer ||= buildComposer();
+  talk.transcript = h('div.transcript', { role: 'log', 'aria-label': 'Conversation' });
+  talk.inspector = h('div.inspector-slot');
+  talk.levels = levelBars(state.levels, state.levelHistory);
+  talk.inbox = h('div.inbox-slot');
+  talk.typing = h('div.msg.aster.typing', { 'aria-label': 'Aster is thinking' }, h('span.dots', h('i'), h('i'), h('i')));
+  talk.empty = h('div.empty', 'No conversation yet. Say hello, or teach Aster something in Teach & ingest.');
+  talk.nodes.clear();
+  talk.mounted = false;
+  talk.el = h('div.talk',
+    h('div.conversation', talk.transcript, talk.composer.el),
+    h('div.aside', talk.inspector, h('div.card', h('h3', 'Levels'), talk.levels), talk.inbox));
+  fill(main, talk.el);
+}
+
+function syncTranscript() {
+  const box = talk.transcript;
+  const stick = talk.forceStick || !talk.mounted || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  talk.forceStick = false;
+  const focused = document.activeElement;
+  const wanted = [];
+  const seen = new Set();
+  for (const turn of state.turns) {
+    const key = messageKey(turn);
+    let node = talk.nodes.get(turn.id);
+    if (!node || node.key !== key) {
+      const el = messageView(turn);
+      // Only genuinely new messages animate in.
+      if (node || !talk.mounted) el.classList.add('settled');
+      node = { el, key };
+      talk.nodes.set(turn.id, node);
+    }
+    seen.add(turn.id);
+    wanted.push(node.el);
+  }
+  for (const [id, node] of talk.nodes) {
+    if (!seen.has(id)) { node.el.remove(); talk.nodes.delete(id); }
+  }
+  wanted.push(...state.pending);
+  if (state.pending.length) wanted.push(talk.typing);
+  if (!wanted.length) wanted.push(talk.empty);
+  // Move only what is out of place, so untouched messages keep their state.
+  let previous = null;
+  for (const el of wanted) {
+    const expected = previous ? previous.nextSibling : box.firstChild;
+    if (expected !== el) box.insertBefore(el, expected);
+    previous = el;
+  }
+  while (previous.nextSibling) previous.nextSibling.remove();
+  if (focused && focused !== document.activeElement && focused.isConnected) focused.focus({ preventScroll: true });
+  if (stick) box.scrollTo({ top: box.scrollHeight, behavior: talk.mounted ? 'smooth' : 'auto' });
+  talk.mounted = true;
+}
+
+function renderTalkInbox() {
+  fill(talk.inbox, state.inbox.length ? h('div.card', h('h3', `Inbox (${state.inbox.length})`),
+    h('div.list', state.inbox.slice(0, 3).map((item) => h('div.small', item.draft.body))),
+    h('button.btn.small', { onclick: () => { location.hash = 'inbox'; } }, 'Open inbox')) : null);
+}
+
+function renderTalk() {
+  if (state.page !== 'talk' || !main) return;
+  mountTalk();
+  syncTranscript();
+  refreshComposer();
+  const inspectorEl = inspectorView();
+  fill(talk.inspector, inspectorEl);
+  talk.el.classList.toggle('no-inspector', !inspectorEl);
+  renderTalkInbox();
+}
+
+/** Levels change every tick: patch the bars wherever they are shown, nothing else. */
+function updateLevels() {
+  for (const el of document.querySelectorAll('.levels')) refreshLevelBars(el, state.levels, state.levelHistory);
 }
 
 async function select(id) {
@@ -385,6 +559,7 @@ async function select(id) {
     return;
   }
   state.selected = id;
+  renderTalk();
   if (!state.traces.has(id)) {
     const trace = await attempt(() => get(`/v1/thoughts/${id}`));
     if (trace) state.traces.set(id, trace);
@@ -403,8 +578,12 @@ async function loadSignals(id) {
 
 function inspectorView() {
   const id = state.selected;
-  const trace = id && state.traces.get(id);
-  if (!trace) return null;
+  if (!id) return null;
+  const trace = state.traces.get(id);
+  if (!trace) {
+    return h('div.card.inspector.stack', h('div.head', h('h3', 'Thought trace')),
+      h('div.skeleton'), h('div.skeleton.short'));
+  }
   const steer = (path, body, done) => attempt(() => post(`/v1/turns/${id}/${path}`, body), (r) => r?.note || done)
     .then((r) => { if (r !== undefined) loadSignals(id); });
   return inspector(trace, {
@@ -419,46 +598,11 @@ function inspectorView() {
       state.traces.set(result.aster.id, result.trace);
       loadSignals(id);
       state.selected = result.aster.id;
+      talk.forceStick = true;
       renderTalk();
     },
     onClose: () => { state.selected = null; renderTalk(); },
   });
-}
-
-function renderTalk() {
-  if (state.page !== 'talk' || !main) return;
-  if (!composer) buildComposer();
-  const stick = !transcriptEl || transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight < 40;
-  const previousScroll = transcriptEl?.scrollTop ?? 0;
-  transcriptEl = h('div.transcript', { role: 'log', 'aria-label': 'Conversation' },
-    state.turns.length ? state.turns.map(messageView)
-      : h('div.empty', 'No conversation yet. Say hello, or teach Aster something in Teach & ingest.'));
-
-  const replying = state.replyTo && state.turns.find((t) => t.id === state.replyTo);
-  fill(composer.el, 
-    h('div.row',
-      h('div.toggle', { role: 'group', 'aria-label': 'Mode' },
-        h(`button${state.mode === 'chat' ? '.on' : ''}`, { onclick: () => { state.mode = 'chat'; renderTalk(); } }, 'Chat'),
-        h(`button${state.mode === 'train' ? '.on' : ''}`, {
-          onclick: () => { state.mode = 'train'; renderTalk(); }, title: 'Rate each reply as you go',
-        }, 'Train')),
-      replying && h('span.chip', `↪ replying to: ${replying.text.slice(0, 48)}`,
-        h('button.btn.small.ghost', { onclick: () => { state.replyTo = null; renderTalk(); }, 'aria-label': 'Cancel reply' }, '✕')),
-      h('span.grow'),
-      state.mode === 'train' && h('span.small.muted', 'Rate each reply ▲ / ▼ or correct it.')),
-    h('div.row', composer.text, h('button.btn.primary', { onclick: () => composer.send() }, 'Send')));
-
-  const inspectorEl = inspectorView();
-  const side = h('div.aside',
-    inspectorEl,
-    h('div.card', h('h3', 'Levels'), levelBars(state.levels, state.levelHistory)),
-    state.inbox.length ? h('div.card', h('h3', `Inbox (${state.inbox.length})`),
-      h('div.list', state.inbox.slice(0, 3).map((item) => h('div.small', item.draft.body))),
-      h('button.btn.small', { onclick: () => { location.hash = 'inbox'; } }, 'Open inbox')) : null);
-
-  fill(main, h(`div.talk${inspectorEl ? '' : '.no-inspector'}`,
-    h('div.conversation', transcriptEl, composer.el), side));
-  transcriptEl.scrollTop = stick ? transcriptEl.scrollHeight : previousScroll;
 }
 
 // ----- inbox ----------------------------------------------------------------
