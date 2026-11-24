@@ -27,7 +27,7 @@ They work out where Aster runs from what's there. Force it with `ASTER_MODE`.
 | `aster-token show` · `rotate` | print the owner token · replace it and restart Aster |
 | `aster-backup` | `pg_dump` + `aster.toml` + `ingest/` into `backups/<time>/` |
 | `aster-restore <dir> [--with-config]` | put a backup back (asks you to type `restore`; backs up first) |
-| `aster-update` | backup, `git pull --ff-only`, rebuild, restart |
+| `aster-update [--no-pull]` | backup, `git pull --ff-only`, rebuild the image, and replace the running containers with new ones (plus nginx on a VPS); checks the new image is the one running, then removes old images. `aster-update --remote user@host` does it on your VPS |
 
 Safety:
 
