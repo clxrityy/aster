@@ -59,6 +59,13 @@ server {
         add_header X-Accel-Buffering no;
     }
 
+    # Uploads carry a whole file as JSON (Aster enforces server.ingest_max_bytes).
+    location = /v1/ingest/upload {
+        client_max_body_size 12m;
+        client_body_timeout 60s;
+        proxy_pass http://aster;
+    }
+
     # Only what Aster serves; everything else is a 404 without reaching it.
     location ~ ^/(v1/|assets/|health/live$|index\.html$|$) {
         proxy_pass http://aster;

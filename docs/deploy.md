@@ -57,7 +57,7 @@ aster-logs                   # follow server output
 aster-logs thoughts 20       # Aster's own logs
 aster console                # the terminal console, inside the container
 aster-backup                 # database + config into deploy/backups/
-aster-update                 # backup, git pull, rebuild, restart
+aster-update                 # backup, git pull, rebuild, replace the containers
 ```
 
 All commands: [commands](commands.md).

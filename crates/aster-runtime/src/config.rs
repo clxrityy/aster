@@ -170,6 +170,34 @@ pub struct AsterConfig {
     pub logs: LogsSection,
     pub console: ConsoleSection,
     pub dashboard: DashboardSection,
+    pub web: WebSection,
+}
+
+/// Reading web pages: ones the owner sends, and ones the owner approves when
+/// Aster asks. Aster never fetches anything on its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebSection {
+    pub enabled: bool,
+    pub timeout_secs: u64,
+    /// Larger pages are cut off at this many bytes.
+    pub max_bytes: usize,
+    pub max_redirects: u32,
+    /// Allow private, loopback and link-local addresses (a LAN wiki, tests).
+    /// Off by default so a link can never reach the server's own network.
+    pub allow_private: bool,
+}
+
+impl Default for WebSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            timeout_secs: 15,
+            max_bytes: 2 * 1024 * 1024,
+            max_redirects: 3,
+            allow_private: false,
+        }
+    }
 }
 
 /// The web dashboard served on the API's own port (same origin, no CORS).
@@ -338,6 +366,9 @@ impl AsterConfig {
         }
         range("console.refresh_ms", self.console.refresh_ms, 16, 5_000)?;
         range("console.history_turns", self.console.history_turns, 1, 500)?;
+        range("web.timeout_secs", self.web.timeout_secs, 1, 120)?;
+        range("web.max_bytes", self.web.max_bytes, 1024, 32 << 20)?;
+        range("web.max_redirects", self.web.max_redirects, 0, 10)?;
         Ok(())
     }
 }

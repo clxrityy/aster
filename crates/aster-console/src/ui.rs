@@ -274,7 +274,7 @@ fn draw_inbox(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Span::styled("? ", Style::new().fg(Color::LightMagenta))
                 };
-                Line::from(vec![
+                let mut spans = vec![
                     Span::raw(format!("{}. ", i + 1)),
                     marker,
                     Span::raw(
@@ -283,7 +283,14 @@ fn draw_inbox(frame: &mut Frame, app: &App, area: Rect) {
                             .unwrap_or("")
                             .replace('\n', " "),
                     ),
-                ])
+                ];
+                if let Some(url) = item["draft"]["source"].as_str() {
+                    spans.push(Span::styled(
+                        format!(" → {url}"),
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                }
+                Line::from(spans)
             })
             .collect()
     };

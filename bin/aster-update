@@ -1,11 +1,85 @@
 #!/usr/bin/env bash
-# aster-update: back up, pull the latest code, rebuild, and restart.
+# aster-update: back up, pull the latest code, rebuild the image, and replace
+# the running containers with ones from the new image.
+#   aster-update                    update here
+#   aster-update --no-pull          rebuild and replace without git pull
+#   aster-update --remote user@host update your VPS over SSH (repo at ~/aster,
+#                                   or ASTER_REMOTE_DIR)
+# Data in ./data and the database volume are kept.
 # shellcheck source=bin/_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
+if [[ "${1:-}" == "--remote" ]]; then
+    host="${2:?usage: aster-update --remote user@host [--no-pull]}"
+    shift 2
+    remote_dir="${ASTER_REMOTE_DIR:-aster}"
+    exec ssh -t "$host" "cd $(printf '%q' "$remote_dir") && bin/aster-update $(printf '%q ' "$@")"
+fi
+
+pull=1
+for arg in "$@"; do
+    case "$arg" in
+        --no-pull) pull=0 ;;
+        *) die "usage: aster-update [--no-pull] [--remote user@host]" ;;
+    esac
+done
+
+mode="$(aster_mode)"
+
+if [[ "$pull" == 1 ]]; then
+    git -C "$ASTER_HOME" pull --ff-only
+fi
+
+if [[ "$mode" == native ]]; then
+    (cd "$ASTER_HOME" && cargo build --locked --release -p aster-api --features "${ASTER_FEATURES-neural}")
+    say "built target/release/aster; restart \`aster serve\` to run it"
+    exit 0
+fi
+
+# The container engine compose uses, for image housekeeping.
+if command -v podman >/dev/null 2>&1; then
+    engine=podman
+else
+    engine=docker
+fi
+image="$(sed -n 's/^ *image: *\(.*aster.*\)$/\1/p' "$(compose_file)" | head -n 1)"
+[[ -n "$image" ]] || die "no aster image in $(compose_file)"
+image_id() { "$engine" image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+
 if running; then
+    say "backing up first…"
     "$ASTER_HOME/bin/aster-backup" >/dev/null
 fi
-git -C "$ASTER_HOME" pull --ff-only
+
+say "building $image…"
 compose build aster-init
+built="$(image_id "$image")"
+[[ -n "$built" ]] || die "the build did not produce $image"
+
+# `up --build` alone keeps containers that already exist, even when their
+# image changed, so remove them and let aster-up create fresh ones. nginx
+# resolves the aster container's address once at start, so it goes too.
+services=(aster aster-init)
+[[ "$mode" != deploy ]] || services+=(nginx)
+say "replacing ${services[*]}…"
+compose stop "${services[@]}" >/dev/null 2>&1 || true
+compose rm -f "${services[@]}" >/dev/null 2>&1 || true
+
 "$ASTER_HOME/bin/aster-up"
+
+# The compose project: `name:` in the file, else the file's folder name.
+project="$(sed -n 's/^name: *//p' "$(compose_file)" | head -n 1)"
+[[ -n "$project" ]] || project="$(basename "$(dirname "$(compose_file)")" | tr '[:upper:]' '[:lower:]')"
+container="$("$engine" ps -q \
+    --filter "label=com.docker.compose.project=$project" \
+    --filter "label=com.docker.compose.service=aster" | head -n 1)"
+running_image="$("$engine" inspect --format '{{.Image}}' "$container" 2>/dev/null || true)"
+running_image="${running_image#sha256:}"
+short="${built#sha256:}"
+if [[ -n "$running_image" && "$short" != "$running_image" ]]; then
+    die "aster is still running image ${running_image:0:12}, not the new ${short:0:12}; try: aster-down && aster-up"
+fi
+say "updated: running image ${short:0:12}"
+
+# Old builds are left untagged; drop them so disk use doesn't grow per update.
+"$engine" image prune -f >/dev/null 2>&1 || true

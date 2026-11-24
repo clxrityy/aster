@@ -75,6 +75,14 @@ pub struct NeuralParams {
     /// Sample among the `top_k` likeliest bytes.
     pub top_k: usize,
     pub max_reply_bytes: usize,
+    /// The network stays quiet until it has trained this many steps...
+    pub min_steps_to_speak: u64,
+    /// ...and its recent mean loss (nats per byte) is at most this.
+    pub max_loss_to_speak: f64,
+    /// Share of a candidate's words Aster must already know (0 disables).
+    pub min_known_words: f64,
+    /// Continuations sampled per turn; the surest one is kept.
+    pub samples: usize,
 }
 
 impl Default for NeuralParams {
@@ -85,13 +93,17 @@ impl Default for NeuralParams {
             hidden: 256,
             learning_rate: 0.003,
             batch: 32,
-            train_steps_per_tick: 8,
+            train_steps_per_tick: 64,
             max_train_ms_per_tick: 200,
             min_corpus_bytes: 512,
             weight: 0.6,
-            temperature: 0.8,
-            top_k: 8,
+            temperature: 0.6,
+            top_k: 5,
             max_reply_bytes: 160,
+            min_steps_to_speak: 2000,
+            max_loss_to_speak: 1.3,
+            min_known_words: 0.8,
+            samples: 3,
         }
     }
 }
@@ -125,6 +137,15 @@ impl NeuralParams {
         }
         if !(1..=257).contains(&self.top_k) || !(1..=2000).contains(&self.max_reply_bytes) {
             return fail("top_k must be within 1..=257 and max_reply_bytes within 1..=2000");
+        }
+        if !(self.max_loss_to_speak.is_finite() && self.max_loss_to_speak > 0.0) {
+            return fail("max_loss_to_speak must be positive");
+        }
+        if !(self.min_known_words.is_finite() && (0.0..=1.0).contains(&self.min_known_words)) {
+            return fail("min_known_words must be within 0..=1");
+        }
+        if !(1..=16).contains(&self.samples) {
+            return fail("samples must be within 1..=16");
         }
         Ok(())
     }
@@ -245,6 +266,13 @@ pub enum LearningSignal {
         name: String,
         text: String,
     },
+    /// A web page the owner sent or approved: its text, and the links it had.
+    Read {
+        url: String,
+        title: String,
+        text: String,
+        links: Vec<SourceLink>,
+    },
     /// The owner picked another of a turn's candidates as the best reply.
     /// `text`/`source` come from the stored trace, never from the client.
     Prefer {
@@ -265,6 +293,13 @@ pub enum LearningSignal {
         prompt: String,
         document: String,
     },
+}
+
+/// A link found in something Aster read: where it goes and what it said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLink {
+    pub url: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]

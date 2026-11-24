@@ -12,11 +12,11 @@ Sign in with your owner token (`aster-token show`). The browser keeps only a ses
 | page | does |
 |---|---|
 | Talk | chat or train mode, rate ▲ ▼, correct, reply to an earlier message, "Why?" opens the thought trace |
-| Inbox | answer Aster's questions, approve or deny its requests |
+| Inbox | answer Aster's questions (a link as the answer is read), approve or deny its requests, including pages it asks to read |
 | Mind | levels now and over time, runtime state, what Aster knows |
 | Neural | engine switch, training steps, loss curve (live) |
 | Memories | remember and forget |
-| Teach & ingest | teach a reply, ingest a file from `data/ingest` |
+| Teach & read | teach a reply; read a web page; drop, choose or paste a file; ingest a file from `data/ingest` ([reading](reading.md)) |
 | Config | every `aster.toml` key, validated before it applies |
 | Snapshots | save, list, roll back |
 | Logs | newest entries of each log category |
