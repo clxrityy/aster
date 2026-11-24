@@ -10,7 +10,7 @@ const PAGES = [
   ['mind', 'Mind'],
   ['neural', 'Neural'],
   ['memories', 'Memories'],
-  ['teach', 'Teach & ingest'],
+  ['teach', 'Teach & read'],
   ['config', 'Config'],
   ['snapshots', 'Snapshots'],
   ['logs', 'Logs'],
@@ -482,7 +482,7 @@ function mountTalk() {
   talk.levels = levelBars(state.levels, state.levelHistory);
   talk.inbox = h('div.inbox-slot');
   talk.typing = h('div.msg.aster.typing', { 'aria-label': 'Aster is thinking' }, h('span.dots', h('i'), h('i'), h('i')));
-  talk.empty = h('div.empty', 'No conversation yet. Say hello, or teach Aster something in Teach & ingest.');
+  talk.empty = h('div.empty', 'No conversation yet. Say hello, or teach Aster something in Teach & read.');
   talk.nodes.clear();
   talk.mounted = false;
   talk.el = h('div.talk',
@@ -615,7 +615,11 @@ function renderInbox() {
         h('span.small.muted', when(item.created_at)), h('span.grow'),
         item.draft.subject && h('span.chip', item.draft.subject)),
       h('div', item.draft.body),
+      item.draft.source && h('a.small.mono.source', {
+        href: item.draft.source, target: '_blank', rel: 'noopener noreferrer',
+      }, item.draft.source),
       h('div.small.muted', `why: ${item.draft.rationale}`),
+      !item.needs_approval && item.draft.subject && h('div.small.muted', 'You can answer with a link: Aster reads the page.'),
       item.needs_approval
         ? h('div.row',
           h('button.btn.primary', { onclick: () => attempt(() => post(`/v1/outbound/${item.id}/approve`), 'approved').then(resync) }, 'Approve'),
@@ -776,14 +780,85 @@ async function renderMemories(cursor) {
     page.next_cursor ? h('button.btn', { onclick: () => renderMemories(page.next_cursor) }, 'Older') : '');
 }
 
-// ----- teach & ingest ---------------------------------------------------------
+// ----- teach & read -----------------------------------------------------------
+
+const UPLOADABLE = /\.(txt|md|markdown|aster|html?)$/i;
+
+/** Send local files to the server's uploads folder, one after another. */
+async function uploadFiles(list) {
+  for (const file of list) {
+    if (!UPLOADABLE.test(file.name)) {
+      toast(`${file.name}: only .txt, .md, .aster and .html can be read`, true);
+      continue;
+    }
+    const name = file.name.replace(/\.htm$/i, '.html');
+    await attempt(async () => post('/v1/ingest/upload', { name, text: await file.text() }),
+      (r) => r?.note || `read ${file.name}`);
+  }
+}
+
+function readCard() {
+  const url = h('input', { type: 'url', placeholder: 'https://…', 'aria-label': 'Page address' });
+  const send = h('button.btn.primary', { type: 'submit' }, 'Read');
+  return h('form.card.stack', {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      const value = url.value.trim();
+      if (!value) return;
+      send.disabled = true;
+      send.textContent = 'Reading…';
+      const result = await attempt(() => post('/v1/read', { url: value }),
+        (r) => `${r.note}${r.truncated ? ' (cut off: page too long)' : ''}`);
+      send.disabled = false;
+      send.textContent = 'Read';
+      if (result) url.value = '';
+    },
+  }, h('h3', 'Read a web page'),
+  h('p.small.muted', 'Aster reads the page\'s text and keeps its links. Later it may ask to read one of them; nothing is fetched until you approve.'),
+  h('div.row', h('div.grow', url), send));
+}
+
+function uploadCard() {
+  const picker = h('input', { type: 'file', multiple: true, accept: '.txt,.md,.markdown,.aster,.html,.htm', 'aria-label': 'Choose files' });
+  picker.addEventListener('change', async () => {
+    await uploadFiles([...picker.files]);
+    picker.value = '';
+  });
+  const zone = h('label.drop', picker, h('span', 'Drop files here, or click to choose'),
+    h('span.small.muted', '.txt · .md · .aster · .html'));
+  zone.addEventListener('dragover', (event) => { event.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    zone.classList.remove('over');
+    uploadFiles([...event.dataTransfer.files]);
+  });
+  return h('div.card.stack', h('h3', 'Send a file'), zone);
+}
+
+function pasteCard() {
+  const name = h('input', { type: 'text', placeholder: 'notes.txt', 'aria-label': 'Name' });
+  const text = h('textarea', { rows: 6, placeholder: 'Paste text. Blank lines separate passages.', 'aria-label': 'Text' });
+  return h('form.card.stack', {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      if (!text.value.trim()) return;
+      let file = name.value.trim() || `pasted-${new Date().toISOString().slice(0, 10)}`;
+      if (!/\.[a-z]+$/i.test(file)) file += '.txt';
+      const result = await attempt(() => post('/v1/ingest/upload', { name: file, text: text.value }), (r) => r?.note || 'read');
+      if (result) { text.value = ''; name.value = ''; }
+    },
+  }, h('h3', 'Paste text'), h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Text'), text),
+  h('div', h('button.btn.primary', { type: 'submit' }, 'Send')));
+}
+
 
 async function renderTeach() {
   const prompt = h('input', { type: 'text', placeholder: 'When I say…', 'aria-label': 'Prompt' });
   const reply = h('textarea', { rows: 2, placeholder: 'Aster replies…', 'aria-label': 'Reply' });
   const files = h('div.list', h('div.empty', 'Loading…'));
   fill(main, h('div.page',
-    h('h2', 'Teach & ingest'),
+    h('h2', 'Teach & read'),
     h('form.card.stack', {
       onsubmit: async (event) => {
         event.preventDefault();
@@ -793,6 +868,9 @@ async function renderTeach() {
       },
     }, h('h3', 'Teach a reply'), h('label.field', h('span', 'Prompt'), prompt), h('label.field', h('span', 'Reply'), reply),
     h('div', h('button.btn.primary', { type: 'submit' }, 'Teach'))),
+    readCard(),
+    uploadCard(),
+    pasteCard(),
     h('div.card.stack',
       h('h3', 'Ingest a file'),
       h('p.small.muted', 'Files in the server\'s ingest folder (data/ingest). Plain text becomes recall passages; .aster files are packs of meanings and replies.'),

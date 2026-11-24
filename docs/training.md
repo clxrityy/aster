@@ -10,6 +10,7 @@ It learns from:
 - **talking:** say what something means in plain words: `a nebula means a cloud of gas`, or `it's a friendly greeting` right after Aster asks.
 - **memories:** `/remember Rust is my main language.` Aster can then recall it.
 - **files:** put text in `data/ingest/`, then run `/ingest notes.txt`. This adds to its vocabulary, language model and recall.
+- **web pages and uploads:** `/read <url>`, `/upload <file>`, `/paste <name>`, or the dashboard's Teach & read page. Aster may also ask to read links it found. See [reading](reading.md).
 
 Aster keeps two kinds of knowledge apart:
 

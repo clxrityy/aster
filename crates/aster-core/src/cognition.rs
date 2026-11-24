@@ -266,6 +266,13 @@ pub enum LearningSignal {
         name: String,
         text: String,
     },
+    /// A web page the owner sent or approved: its text, and the links it had.
+    Read {
+        url: String,
+        title: String,
+        text: String,
+        links: Vec<SourceLink>,
+    },
     /// The owner picked another of a turn's candidates as the best reply.
     /// `text`/`source` come from the stored trace, never from the client.
     Prefer {
@@ -286,6 +293,13 @@ pub enum LearningSignal {
         prompt: String,
         document: String,
     },
+}
+
+/// A link found in something Aster read: where it goes and what it said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLink {
+    pub url: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]

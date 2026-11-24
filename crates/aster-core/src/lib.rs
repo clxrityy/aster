@@ -15,7 +15,7 @@ pub mod world;
 
 pub use cognition::{
     Cognition, CognitionParams, ENGINES, InvalidParams, LearnOutcome, LearningSignal, NeuralParams,
-    Response, SnapshotError, TrainPoint, TrainReport, TurnContext,
+    Response, SnapshotError, SourceLink, TrainPoint, TrainReport, TurnContext,
 };
 pub use identity::{EvolvingIdentity, IdentitySnapshot, ProtectedIdentity};
 pub use memory::{

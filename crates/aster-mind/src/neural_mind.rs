@@ -162,10 +162,9 @@ impl Cognition for NeuralMind {
             ..
         } = self;
         let recent_loss = recent_loss(history);
-        let mut response =
-            statistical.respond_with(context, &mut |text, exploration, notes| {
-                propose(model, rng, text, exploration, params, recent_loss, notes)
-            });
+        let mut response = statistical.respond_with(context, &mut |text, exploration, notes| {
+            propose(model, rng, text, exploration, params, recent_loss, notes)
+        });
         response.trace.engine = ENGINE.into();
         response.trace.notes.append(&mut self.notes);
         response
@@ -360,7 +359,9 @@ fn propose(
     // Geometric-mean byte probability: how sure the network was, 0..1.
     let certainty = mean_log_prob.exp().clamp(0.0, 1.0);
     if certainty < MIN_CERTAINTY {
-        notes.push(format!("neural candidate dropped: certainty {certainty:.2}"));
+        notes.push(format!(
+            "neural candidate dropped: certainty {certainty:.2}"
+        ));
         return None;
     }
     Some(Candidate {

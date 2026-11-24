@@ -63,7 +63,12 @@ impl OutboundStatus {
 pub enum RequestEffect {
     /// Pause initiative and apply the rest event.
     Rest,
+    /// Read the page at the draft's `source` URL.
+    Fetch,
 }
+
+/// Longest URL a request may carry.
+pub const MAX_SOURCE_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutboundDraft {
@@ -76,6 +81,9 @@ pub struct OutboundDraft {
     pub prompt: Option<String>,
     pub action: Option<Action>,
     pub effect: Option<RequestEffect>,
+    /// The page a `Fetch` request asks to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
@@ -84,6 +92,8 @@ pub enum OutboundRejected {
     Text,
     #[error("the autonomous actor is denied this action")]
     Denied,
+    #[error("a fetch request needs one http(s) URL of at most 2048 bytes")]
+    Source,
 }
 
 impl OutboundDraft {
@@ -96,6 +106,26 @@ impl OutboundDraft {
             prompt: None,
             action: Some(Action::AskOwner),
             effect: None,
+            source: None,
+        }
+    }
+
+    /// Ask to read a page. Always a request: nothing is fetched until the
+    /// owner approves, and the runtime checks the URL again then.
+    pub fn fetch(
+        url: impl Into<String>,
+        body: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: OutboundKind::Request,
+            body: body.into(),
+            rationale: rationale.into(),
+            subject: None,
+            prompt: None,
+            action: Some(Action::BrowseSource),
+            effect: Some(RequestEffect::Fetch),
+            source: Some(url.into()),
         }
     }
 
@@ -111,6 +141,17 @@ impl OutboundDraft {
             && PermissionPolicy.decide(Actor::Autonomous, action) == PermissionDecision::Denied
         {
             return Err(OutboundRejected::Denied);
+        }
+        let fetch = self.effect == Some(RequestEffect::Fetch);
+        let source_ok = self.source.as_deref().is_some_and(|url| {
+            (url.starts_with("https://") || url.starts_with("http://"))
+                && url.len() <= MAX_SOURCE_BYTES
+                && !url.contains(char::is_whitespace)
+        });
+        if fetch != self.source.is_some()
+            || (fetch && (!source_ok || self.action != Some(Action::BrowseSource)))
+        {
+            return Err(OutboundRejected::Source);
         }
         Ok(self)
     }
@@ -151,6 +192,26 @@ mod tests {
                 .unwrap()
                 .needs_approval()
         );
+    }
+
+    #[test]
+    fn fetch_requests_need_approval_and_a_web_url() {
+        let draft = OutboundDraft::fetch("https://example.org/a", "May I read it?", "curious")
+            .admit()
+            .unwrap();
+        assert!(draft.needs_approval());
+        for bad in ["file:///etc/passwd", "https://a b", "javascript:alert(1)"] {
+            assert_eq!(
+                OutboundDraft::fetch(bad, "May I?", "r").admit(),
+                Err(OutboundRejected::Source)
+            );
+        }
+        let mut sneaky = OutboundDraft::fetch("https://example.org", "May I?", "r");
+        sneaky.action = Some(Action::AskOwner);
+        assert!(sneaky.admit().is_err());
+        let mut stray = OutboundDraft::question("What is X?", "r");
+        stray.source = Some("https://example.org".into());
+        assert!(stray.admit().is_err());
     }
 
     #[test]

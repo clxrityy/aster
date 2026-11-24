@@ -8,6 +8,7 @@ Aster is a private, persistent mind that learns only from you. No external AI.
 | [dashboard](dashboard.md) | the web dashboard, steering replies, sign-in |
 | [console](console.md) | the terminal environment and its commands |
 | [training](training.md) | teaching, rating, ingesting, snapshots |
+| [reading](reading.md) | web pages and files: sending them, Aster's requests, safety |
 | [configuration](configuration.md) | `aster.toml`, live changes, every section |
 | [regulation](regulation.md) | the 7 levels and what Aster regulates itself |
 | [logs](logs.md) | JSONL log files and how to read them |

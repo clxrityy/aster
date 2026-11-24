@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use aster_core::{
     Action, Candidate, CandidateSource, Cognition, CognitionParams, Decision, LearnOutcome,
     LearningSignal, OutboundDraft, OutboundKind, Recalled, RegulationEvent, RegulatoryState,
-    RequestEffect, Response, SnapshotError, ThoughtTrace, TurnContext,
+    RequestEffect, Response, SnapshotError, SourceLink, ThoughtTrace, TurnContext,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,10 +25,35 @@ use crate::{
     understand::{self, Intent},
 };
 
+/// The neural engine's hook into the turn pipeline: given the owner's text,
+/// the current exploration and the trace notes, maybe one more candidate.
+pub(crate) type ExtraCandidate<'a> =
+    dyn FnMut(&str, f64, &mut Vec<String>) -> Option<Candidate> + 'a;
+
+/// Words that say where a link goes, not what it is about.
+const LINK_FILLER: &[&str] = &[
+    "page", "pages", "click", "here", "link", "links", "read", "more", "article", "edit", "source",
+    "view", "home", "next", "previous", "prev", "back", "see", "also", "main", "contents", "help",
+    "login", "log", "sign", "html", "htm", "php", "aspx", "index", "wiki", "www", "com", "org",
+    "net", "category", "file", "special", "talk", "user", "search",
+];
+
+/// Words in a URL's path ("/wiki/Dark_nebula" → dark, nebula).
+fn url_terms(url: &str) -> Vec<String> {
+    let path = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(_, path)| path.split(['?', '#']).next().unwrap_or(""))
+        .unwrap_or("");
+    content_terms(&tokens(&path.replace(['/', '_', '-', '.', '+'], " ")))
+}
+
 const ENGINE: &str = "statistical";
 const FORMAT_VERSION: u32 = 2;
 const RECENT_TURNS: usize = 128;
 const CURIOSITY_QUEUE: usize = 32;
+/// Most links kept to ask about later; the oldest go first.
+const READING_LIST: usize = 300;
 const MAX_WEIGHT: f64 = 3.0;
 const MIN_SIMILARITY: f64 = 0.2;
 const MIN_GENERATION_TOKENS: u64 = 30;
@@ -127,6 +152,15 @@ pub struct StatisticalMind {
     /// were irrelevant for (document id → terms).
     #[serde(default)]
     suppressed: HashMap<String, BTreeSet<String>>,
+    /// Pages already read (or asked about), so none is requested twice.
+    #[serde(default)]
+    read_urls: BTreeSet<String>,
+    /// Links found in pages Aster read, oldest first: what it may ask to read next.
+    #[serde(default)]
+    reading_list: VecDeque<SourceLink>,
+    /// Terms Aster already asked the owner to send reading about.
+    #[serde(default)]
+    asked_for_reading: BTreeSet<String>,
     #[serde(skip)]
     rng: Rng,
 }
@@ -152,6 +186,9 @@ impl StatisticalMind {
             updates: 0,
             asked_for_first_lesson: false,
             suppressed: HashMap::new(),
+            read_urls: BTreeSet::new(),
+            reading_list: VecDeque::new(),
+            asked_for_reading: BTreeSet::new(),
             rng: Rng::new(params.rng_seed),
         }
     }
@@ -360,6 +397,64 @@ impl StatisticalMind {
         (means || asked_about).then(|| subject.to_string())
     }
 
+    /// The next link from pages Aster read that is worth asking to read: one
+    /// whose words include something it doesn't know yet. Links looked at are
+    /// dropped from the list whether asked about or not, so none is asked twice.
+    fn link_to_follow(&mut self, levels: &RegulatoryState) -> Option<OutboundDraft> {
+        while let Some(link) = self.reading_list.pop_front() {
+            if self.read_urls.contains(&link.url) {
+                continue;
+            }
+            let anchor = content_terms(&tokens(&link.text));
+            let path = url_terms(&link.url);
+            let wanted = |t: &&String| {
+                t.chars().count() > 2
+                    && t.chars().any(char::is_alphabetic)
+                    && !LINK_FILLER.contains(&t.as_str())
+                    && (!self.knows(t) || self.curious_about.contains(*t))
+            };
+            let Some(term) = anchor
+                .iter()
+                .find(wanted)
+                .or_else(|| path.iter().find(wanted))
+                .cloned()
+            else {
+                continue;
+            };
+            self.read_urls.insert(link.url.clone());
+            return Some(OutboundDraft::fetch(
+                link.url.clone(),
+                format!(
+                    "May I read “{}”? It's linked from something I read, and I don't know “{term}” yet.",
+                    excerpt(&link.text, 80)
+                ),
+                format!(
+                    "curiosity {:.0}; “{term}” is unknown and {} links to it",
+                    levels.curiosity.get(),
+                    link.url
+                ),
+            ));
+        }
+        None
+    }
+
+    /// Learn a document: vocabulary and language model, then one recall
+    /// passage per blank-line-separated block. Returns the passage count.
+    fn take_in(&mut self, id: &str, kind: &str, text: &str, order: usize) -> usize {
+        self.observe(text, order);
+        let mut passages = 0;
+        for (i, passage) in text
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .enumerate()
+        {
+            self.recall.add(&format!("{id}#{i}"), kind, passage);
+            passages += 1;
+        }
+        passages
+    }
+
     fn observe(&mut self, text: &str, order: usize) {
         let toks = tokens(text);
         for word in words(&toks) {
@@ -451,7 +546,7 @@ impl StatisticalMind {
     pub(crate) fn respond_with(
         &mut self,
         context: &TurnContext<'_>,
-        extra: &mut dyn FnMut(&str, f64, &mut Vec<String>) -> Option<Candidate>,
+        extra: &mut ExtraCandidate<'_>,
     ) -> Response {
         let params = context.params;
         let levels = context.levels;
@@ -1094,21 +1189,37 @@ impl Cognition for StatisticalMind {
                 }
             }
             LearningSignal::Ingest { name, text } => {
-                self.observe(&text, order);
-                let mut passages = 0;
-                for (i, passage) in text
-                    .split("\n\n")
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .enumerate()
-                {
-                    self.recall
-                        .add(&format!("ingest:{name}#{i}"), "ingest", passage);
-                    passages += 1;
-                }
+                let passages = self.take_in(&format!("ingest:{name}"), "ingest", &text, order);
                 LearnOutcome {
                     events: vec![RegulationEvent::Ingested],
                     note: format!("ingested {name}: {passages} passages"),
+                    updated: true,
+                }
+            }
+            LearningSignal::Read {
+                url,
+                title,
+                text,
+                links,
+            } => {
+                let passages = self.take_in(&format!("web:{url}"), "web", &text, order);
+                self.read_urls.insert(url.clone());
+                let mut saved = 0;
+                for link in links {
+                    if self.read_urls.contains(&link.url)
+                        || self.reading_list.iter().any(|l| l.url == link.url)
+                    {
+                        continue;
+                    }
+                    self.reading_list.push_back(link);
+                    saved += 1;
+                }
+                while self.reading_list.len() > READING_LIST {
+                    self.reading_list.pop_front();
+                }
+                LearnOutcome {
+                    events: vec![RegulationEvent::Ingested],
+                    note: format!("read “{title}”: {passages} passages, {saved} new links"),
                     updated: true,
                 }
             }
@@ -1133,10 +1244,14 @@ impl Cognition for StatisticalMind {
                 prompt: None,
                 action: Some(Action::RegulateState),
                 effect: Some(RequestEffect::Rest),
+                source: None,
             });
         }
         if levels.curiosity.get() < params.initiative_curiosity_min {
             return None;
+        }
+        if let Some(draft) = self.link_to_follow(levels) {
+            return Some(draft);
         }
         if let Some(term) = self.curious_about.pop_front() {
             self.asked.insert(term.clone());
@@ -1163,6 +1278,24 @@ impl Cognition for StatisticalMind {
                 "no replies taught by the owner yet",
             ));
         }
+        // Asked what a word means and never told: ask for something to read.
+        let unanswered = self
+            .asked
+            .iter()
+            .filter(|t| !self.knows(t) && !self.asked_for_reading.contains(*t))
+            .min()
+            .cloned();
+        if let Some(term) = unanswered {
+            self.asked_for_reading.insert(term.clone());
+            let mut draft = OutboundDraft::question(
+                format!(
+                    "I still don't know what “{term}” means. Could you send me something to read about it? A link is fine."
+                ),
+                format!("asked about “{term}” before and it is still unknown"),
+            );
+            draft.subject = Some(term);
+            return Some(draft);
+        }
         None
     }
 
@@ -1184,6 +1317,8 @@ impl Cognition for StatisticalMind {
             ("packs".into(), self.packs.len() as f64),
             ("recall_documents".into(), self.recall.len() as f64),
             ("curiosity_queue".into(), self.curious_about.len() as f64),
+            ("pages_read".into(), self.read_urls.len() as f64),
+            ("reading_list".into(), self.reading_list.len() as f64),
             ("reward_ema".into(), self.reward_ema),
             ("exploration_position".into(), self.exploration),
             ("caution_position".into(), self.caution),
@@ -1813,5 +1948,117 @@ mod tests {
         let first = mind.initiative(&levels, &params()).unwrap();
         assert!(first.body.contains("teach me first"));
         assert!(mind.initiative(&levels, &params()).is_none());
+    }
+
+    fn read_page(mind: &mut StatisticalMind, links: &[(&str, &str)]) -> LearnOutcome {
+        mind.learn(
+            LearningSignal::Read {
+                url: "https://wiki.test/Nebula".into(),
+                title: "Nebula".into(),
+                text: "A nebula is a giant cloud of dust and gas.\n\nStars form inside nebulae."
+                    .into(),
+                links: links
+                    .iter()
+                    .map(|(url, text)| SourceLink {
+                        url: (*url).into(),
+                        text: (*text).into(),
+                    })
+                    .collect(),
+            },
+            &params(),
+        )
+    }
+
+    #[test]
+    fn reading_a_page_teaches_its_text_and_keeps_its_links() {
+        let mut mind = StatisticalMind::new(&params());
+        teach(&mut mind, "hello", "Hi.");
+        let outcome = read_page(
+            &mut mind,
+            &[
+                ("https://wiki.test/Supernova", "a supernova"),
+                ("https://wiki.test/Nebula", "self link"),
+            ],
+        );
+        assert!(outcome.note.contains("2 passages"), "{}", outcome.note);
+        // The page's own URL counts as read, so it is not kept as a link.
+        assert!(outcome.note.contains("1 new links"), "{}", outcome.note);
+        assert!(mind.knows("nebula"));
+        assert_eq!(mind.stats()["pages_read"], 1.0);
+        let (_, response) = ask(&mut mind, "tell me about dust clouds");
+        assert!(
+            response
+                .trace
+                .recalled
+                .iter()
+                .any(|r| r.source.starts_with("web:")),
+            "{:?}",
+            response.trace
+        );
+    }
+
+    #[test]
+    fn it_asks_to_read_links_about_words_it_does_not_know_once() {
+        let mut mind = StatisticalMind::new(&params());
+        teach(&mut mind, "hello", "Hi.");
+        read_page(
+            &mut mind,
+            &[
+                ("https://wiki.test/Gas", "gas"),
+                ("https://wiki.test/Quasar", "click this page here"),
+                ("https://wiki.test/Pulsar", "pulsars"),
+            ],
+        );
+        let levels = RegulatoryState::default();
+        // "gas" is known from the page; the next link's URL names "quasar".
+        let first = mind.initiative(&levels, &params()).unwrap();
+        assert_eq!(first.effect, Some(RequestEffect::Fetch));
+        assert_eq!(first.source.as_deref(), Some("https://wiki.test/Quasar"));
+        assert!(first.body.contains("quasar"), "{}", first.body);
+        assert!(first.clone().admit().unwrap().needs_approval());
+        let second = mind.initiative(&levels, &params()).unwrap();
+        assert_eq!(second.source.as_deref(), Some("https://wiki.test/Pulsar"));
+        // Each link is asked about once, even across a snapshot.
+        let mut restored = StatisticalMind::restore(&mind.snapshot().unwrap(), &params()).unwrap();
+        read_page(&mut restored, &[("https://wiki.test/Pulsar", "pulsars")]);
+        assert!(
+            restored
+                .initiative(&levels, &params())
+                .is_none_or(|d| d.effect != Some(RequestEffect::Fetch))
+        );
+    }
+
+    #[test]
+    fn snapshots_from_before_reading_still_restore() {
+        let mind = StatisticalMind::new(&params());
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&mind.snapshot().unwrap()).unwrap();
+        for key in ["read_urls", "reading_list", "asked_for_reading"] {
+            json.as_object_mut().unwrap().remove(key);
+        }
+        let restored =
+            StatisticalMind::restore(&serde_json::to_vec(&json).unwrap(), &params()).unwrap();
+        assert_eq!(restored.stats()["reading_list"], 0.0);
+    }
+
+    #[test]
+    fn an_unanswered_question_becomes_a_request_for_reading() {
+        let mut mind = StatisticalMind::new(&params());
+        teach(&mut mind, "hello", "Hi.");
+        mind.asked.insert("quokka".into());
+        let draft = mind
+            .initiative(&RegulatoryState::default(), &params())
+            .unwrap();
+        assert!(
+            draft.body.contains("send me something to read"),
+            "{}",
+            draft.body
+        );
+        assert_eq!(draft.subject.as_deref(), Some("quokka"));
+        assert!(!draft.admit().unwrap().needs_approval());
+        assert!(
+            mind.initiative(&RegulatoryState::default(), &params())
+                .is_none()
+        );
     }
 }

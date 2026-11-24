@@ -115,6 +115,8 @@ pub struct App {
     pub status: String,
     pub quit: bool,
     seen_turns: HashSet<String>,
+    /// `/paste <name>` in progress: the name and the lines so far.
+    pub paste: Option<(String, String)>,
 }
 
 fn time_of(value: &Value) -> String {
@@ -147,6 +149,9 @@ pub const HELP: &[&str] = &[
     "  /approve <n>  /deny <n>     decide on request n",
     "  /remember <text>            store a memory     /forget <memory-id>",
     "  /ingest <path>              learn from a file inside server.ingest_dir",
+    "  /read <url>                 read a web page (its links may become requests)",
+    "  /upload <local file>        send a .txt/.md/.aster/.html file from this machine",
+    "  /paste <name>               paste text; end with a line holding just .",
     "  /set <key> <value>          change aster.toml live    /get <key>",
     "  /config [section]           show configuration",
     "  /pause  /resume             freeze or resume regulation and initiative",
@@ -198,6 +203,7 @@ impl App {
             status: "connecting…".into(),
             quit: false,
             seen_turns: HashSet::new(),
+            paste: None,
         }
     }
 
@@ -608,6 +614,11 @@ impl App {
                 let line = std::mem::take(&mut self.input);
                 self.cursor = 0;
                 self.history_pos = None;
+                if self.paste.is_some() {
+                    // Pasting keeps blank lines and indentation.
+                    self.paste_line(line.trim_end());
+                    return;
+                }
                 let line = line.trim().to_string();
                 if !line.is_empty() {
                     if self.history.last() != Some(&line) {
@@ -729,6 +740,33 @@ impl App {
         self.call(Method::POST, path, Some(body), done);
     }
 
+    fn paste_line(&mut self, line: &str) {
+        let Some((name, text)) = self.paste.as_mut() else {
+            return;
+        };
+        match line {
+            "." => {
+                let (name, text) = (name.clone(), std::mem::take(text));
+                self.paste = None;
+                self.system(format!("sending {name} ({} bytes)…", text.len()));
+                self.call(
+                    Method::POST,
+                    "/v1/ingest/upload".into(),
+                    Some(json!({ "name": name, "text": text })),
+                    "read",
+                );
+            }
+            "/cancel" => {
+                self.paste = None;
+                self.system("paste cancelled");
+            }
+            _ => {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+    }
+
     fn submit(&mut self, line: &str) {
         if self.awaiting_rating && (line == "+" || line == "-") {
             self.rate(if line == "+" { 1 } else { -1 }, None);
@@ -844,6 +882,60 @@ impl App {
                     Some(json!({ "path": rest })),
                     "ingested",
                 );
+            }
+            "read" if !rest.is_empty() => {
+                self.system(format!("reading {rest}…"));
+                self.call(
+                    Method::POST,
+                    "/v1/read".into(),
+                    Some(json!({ "url": rest })),
+                    "read",
+                );
+            }
+            "upload" if !rest.is_empty() => {
+                let path = match (rest.strip_prefix("~/"), std::env::var_os("HOME")) {
+                    (Some(tail), Some(home)) => std::path::PathBuf::from(home).join(tail),
+                    _ => std::path::PathBuf::from(rest),
+                };
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                self.system(format!("uploading {name}…"));
+                self.spawn(move |client| async move {
+                    let text = match tokio::fs::read_to_string(&path).await {
+                        Ok(text) => text,
+                        Err(error) => {
+                            return Msg::Notice(
+                                format!("could not read {}: {error}", path.display()),
+                                true,
+                            );
+                        }
+                    };
+                    let body = json!({ "name": name, "text": text });
+                    match client
+                        .json(Method::POST, "/v1/ingest/upload", Some(body))
+                        .await
+                    {
+                        Ok(value) => Msg::Notice(
+                            format!("read: {}", value["note"].as_str().unwrap_or("done")),
+                            false,
+                        ),
+                        Err(error) => Msg::Notice(error, true),
+                    }
+                });
+            }
+            "paste" if !rest.is_empty() => {
+                let name = if rest.contains('.') {
+                    rest.to_string()
+                } else {
+                    format!("{rest}.txt")
+                };
+                self.system(format!(
+                    "pasting into {name}: type or paste text, then a line with just . to send (/cancel to stop)"
+                ));
+                self.paste = Some((name, String::new()));
             }
             "set" => match rest.split_once(char::is_whitespace) {
                 Some((key, value)) if !value.trim().is_empty() => {

@@ -90,6 +90,8 @@ pub(super) fn router(runtime: Option<Arc<Runtime>>) -> Router<AppState> {
         .route("/v1/teach", post(teach))
         .route("/v1/ingest", post(ingest))
         .route("/v1/ingest/files", get(ingest_files))
+        .route("/v1/ingest/upload", post(upload))
+        .route("/v1/read", post(read))
         .route("/v1/logs/{category}", get(log_tail))
         .route("/v1/outbound", get(outbound))
         .route("/v1/outbound/{id}/answer", post(answer))
@@ -194,7 +196,32 @@ async fn require_runtime(State(guard): State<Guard>, request: Request, next: Nex
 
 async fn limits(State(guard): State<Guard>, request: Request, next: Next) -> Response {
     let runtime = runtime!(guard.runtime);
-    let server = runtime.config().get().server.clone();
+    let cfg = runtime.config().get();
+    let server = cfg.server.clone();
+    // Uploads carry a whole file; reading a page waits on another server.
+    // Uploads carry a whole file. Reading a page (directly, or by approving
+    // a request or answering with a link) waits on another server.
+    let path = request.uri().path();
+    let reads = path == "/v1/read"
+        || (path.starts_with("/v1/outbound/")
+            && (path.ends_with("/approve") || path.ends_with("/answer")));
+    let body_limit = if path == "/v1/ingest/upload" {
+        server.body_limit_bytes.max(
+            usize::try_from(server.ingest_max_bytes)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(2)
+                .saturating_add(4096),
+        )
+    } else {
+        server.body_limit_bytes
+    };
+    let timeout_ms = if reads {
+        server
+            .request_timeout_ms
+            .max(cfg.web.timeout_secs * 1000 + 5_000)
+    } else {
+        server.request_timeout_ms
+    };
     // Reads (dashboard resyncs, TUI refreshes) don't spend the write budget.
     let read = request.method() == axum::http::Method::GET;
     if !read && !guard.limiter.allow(server.rate_limit_per_minute) {
@@ -205,18 +232,13 @@ async fn limits(State(guard): State<Guard>, request: Request, next: Next) -> Res
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok());
-    if declared.is_some_and(|len| len > server.body_limit_bytes) {
+    if declared.is_some_and(|len| len > body_limit) {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", None);
     }
     let (parts, body) = request.into_parts();
-    let body = Body::new(http_body_util::Limited::new(body, server.body_limit_bytes));
+    let body = Body::new(http_body_util::Limited::new(body, body_limit));
     let request = Request::from_parts(parts, body);
-    match tokio::time::timeout(
-        Duration::from_millis(server.request_timeout_ms),
-        next.run(request),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), next.run(request)).await {
         Ok(response) => response,
         Err(_) => error(StatusCode::GATEWAY_TIMEOUT, "request_timeout", None),
     }
@@ -358,6 +380,37 @@ async fn ingest(
     let runtime = runtime!(slot);
     let input = body!(input);
     respond(runtime.ingest(&input.path).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadInput {
+    name: String,
+    text: String,
+}
+
+async fn upload(
+    State(slot): State<RuntimeSlot>,
+    input: Result<Json<UploadInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.upload(&input.name, &input.text).await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadInput {
+    url: String,
+}
+
+async fn read(
+    State(slot): State<RuntimeSlot>,
+    input: Result<Json<ReadInput>, JsonRejection>,
+) -> Response {
+    let runtime = runtime!(slot);
+    let input = body!(input);
+    respond(runtime.read_url(&input.url, "owner").await)
 }
 
 async fn outbound(State(slot): State<RuntimeSlot>, Query(query): Query<LimitQuery>) -> Response {

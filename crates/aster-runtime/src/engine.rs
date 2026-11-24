@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::{
     config::ConfigHandle,
     events::{Envelope, Event},
-    logs,
+    logs, web,
 };
 
 pub const MAX_TEXT_BYTES: usize = 16 * 1024;
@@ -82,6 +82,22 @@ pub struct LearnResult {
     pub note: String,
     pub levels: RegulatoryState,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadResult {
+    pub url: String,
+    pub title: String,
+    /// Where the text was saved, inside `server.ingest_dir`.
+    pub saved_as: String,
+    pub bytes: usize,
+    pub links: usize,
+    pub truncated: bool,
+    pub note: String,
+    pub levels: RegulatoryState,
+}
+
+/// File types `upload` accepts. HTML is read down to its text first.
+pub const UPLOAD_EXTENSIONS: [&str; 5] = ["txt", "md", "markdown", "aster", "html"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestFile {
@@ -703,6 +719,132 @@ impl Runtime {
         Ok(candidate)
     }
 
+    /// A safe file name for an upload: one plain path component with an
+    /// accepted extension. HTML is stored as the text read from it.
+    pub fn upload_name(name: &str) -> Result<String, RuntimeError> {
+        let name = name.trim();
+        let bad = |why: &str| Err(RuntimeError::Invalid(format!("file name {why}")));
+        if name.is_empty() || name.len() > 120 {
+            return bad("must be 1 to 120 characters");
+        }
+        if name.starts_with('.') || name.contains(['/', '\\', '\0']) || name.contains("..") {
+            return bad("must be a plain name (no folders, no leading dot)");
+        }
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            return bad("needs an extension (.txt, .md, .aster or .html)");
+        };
+        let extension = extension.to_ascii_lowercase();
+        if stem.is_empty() || !UPLOAD_EXTENSIONS.contains(&extension.as_str()) {
+            return bad("must end in .txt, .md, .markdown, .aster or .html");
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+        {
+            return bad("may use letters, digits, spaces, '-', '_' and '.'");
+        }
+        Ok(if extension == "html" {
+            format!("{stem}.txt")
+        } else {
+            name.to_string()
+        })
+    }
+
+    /// Save owner-sent text (a file upload or a paste) under
+    /// `ingest_dir/uploads/` and learn from it like `/ingest`.
+    pub async fn upload(&self, name: &str, text: &str) -> Result<LearnResult, RuntimeError> {
+        let server = self.config.get().server.clone();
+        if text.len() as u64 > server.ingest_max_bytes {
+            return Err(RuntimeError::Invalid(format!(
+                "text exceeds server.ingest_max_bytes ({})",
+                server.ingest_max_bytes
+            )));
+        }
+        if text.trim().is_empty() || text.contains('\0') {
+            return Err(RuntimeError::Invalid(
+                "text must be nonblank and NUL-free".into(),
+            ));
+        }
+        let stored = Self::upload_name(name)?;
+        let text = if name.to_ascii_lowercase().ends_with(".html") {
+            let page = web::read_html(text, None);
+            format!("{}\n\n{}", page.title, page.text)
+        } else {
+            text.to_string()
+        };
+        let dir = PathBuf::from(&server.ingest_dir).join("uploads");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|_| RuntimeError::Invalid("could not create the uploads folder".into()))?;
+        tokio::fs::write(dir.join(&stored), text.as_bytes())
+            .await
+            .map_err(|_| RuntimeError::Invalid("could not save the upload".into()))?;
+        self.ingest(&format!("uploads/{stored}")).await
+    }
+
+    /// Fetch a page the owner sent or approved, save its text under
+    /// `ingest_dir/web/`, and learn from it (text, and links to ask about).
+    pub async fn read_url(&self, url: &str, origin: &str) -> Result<ReadResult, RuntimeError> {
+        let cfg = self.config.get();
+        let page = web::fetch(url, &cfg.web)
+            .await
+            .map_err(RuntimeError::Invalid)?;
+        if page.text.trim().is_empty() {
+            return Err(RuntimeError::Invalid(format!(
+                "found no readable text at {}",
+                page.url
+            )));
+        }
+        let saved_as = format!("web/{}", web_file_name(&page.url));
+        let dir = PathBuf::from(&cfg.server.ingest_dir).join("web");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|_| RuntimeError::Invalid("could not create the web folder".into()))?;
+        let file = format!("# {}\n{}\n\n{}\n", page.title, page.url, page.text);
+        tokio::fs::write(
+            PathBuf::from(&cfg.server.ingest_dir).join(&saved_as),
+            file.as_bytes(),
+        )
+        .await
+        .map_err(|_| RuntimeError::Invalid("could not save the page".into()))?;
+        let host = url::Url::parse(&page.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        self.store
+            .record_audit(
+                "read_url",
+                serde_json::json!({
+                    "host": host,
+                    "bytes": page.text.len(),
+                    "origin": origin,
+                }),
+            )
+            .await?;
+        let links = page.links.len();
+        let (outcome, levels) = self
+            .learn(
+                "read",
+                LearningSignal::Read {
+                    url: page.url.clone(),
+                    title: page.title.clone(),
+                    text: page.text.clone(),
+                    links: page.links,
+                },
+            )
+            .await?;
+        Ok(ReadResult {
+            url: page.url,
+            title: page.title,
+            saved_as,
+            bytes: page.text.len(),
+            links,
+            truncated: page.truncated,
+            note: outcome.note,
+            levels,
+        })
+    }
+
     pub async fn ingest(&self, relative: &str) -> Result<LearnResult, RuntimeError> {
         let server = self.config.get().server.clone();
         let path = Self::resolve_ingest_path(Path::new(&server.ingest_dir), relative)?;
@@ -883,6 +1025,13 @@ impl Runtime {
                 "this is a request; approve or deny it".into(),
             ));
         }
+        // A link as the answer: read it (before resolving, so a page that
+        // can't be read leaves the question open).
+        let read = if web::parse_url(&text).is_ok() && !text.contains(char::is_whitespace) {
+            Some(self.read_url(&text, "answer").await?)
+        } else {
+            None
+        };
         let resolved = self
             .store
             .resolve_outbound(id, OutboundStatus::Answered, Some(&text))
@@ -891,6 +1040,12 @@ impl Runtime {
         self.emit(Event::Outbound {
             item: Box::new(resolved.clone()),
         });
+        if let Some(read) = read {
+            return Ok(LearnResult {
+                note: read.note,
+                levels: read.levels,
+            });
+        }
         let (outcome, levels) = self
             .learn(
                 "answer",
@@ -927,6 +1082,20 @@ impl Runtime {
         self.emit(Event::Outbound {
             item: Box::new(resolved.clone()),
         });
+        if approve
+            && resolved.draft.effect == Some(RequestEffect::Fetch)
+            && let Some(url) = resolved.draft.source.clone()
+        {
+            // The fetcher checks the URL and every redirect again here.
+            let message = match self.read_url(&url, "approved").await {
+                Ok(read) => read.note,
+                Err(error) => format!("could not read {url}: {error}"),
+            };
+            self.emit(Event::Runtime {
+                message,
+                paused: self.config.get().runtime.paused,
+            });
+        }
         if approve && resolved.draft.effect == Some(RequestEffect::Rest) {
             let minutes = self.config.get().runtime.rest_minutes;
             self.inner().rest_until = Some(Instant::now() + Duration::from_secs(minutes * 60));
@@ -1181,6 +1350,8 @@ impl Runtime {
         };
         // Wait another idle period before the next initiative either way.
         self.inner().last_activity = Instant::now();
+        // Don't ask to read pages that couldn't be read anyway.
+        let draft = draft.filter(|d| cfg.web.enabled || d.effect != Some(RequestEffect::Fetch));
         if let Some(draft) = draft {
             self.propose(draft).await?;
         }
@@ -1188,9 +1359,83 @@ impl Runtime {
     }
 }
 
+/// `<host>-<path slug>-<hash>.txt`: readable, stable per URL, and safe.
+fn web_file_name(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let parsed = url::Url::parse(url).ok();
+    let host = parsed
+        .as_ref()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let path = parsed
+        .as_ref()
+        .map(|u| u.path().to_string())
+        .unwrap_or_default();
+    let slug = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    };
+    let mut path = slug(&path);
+    path.truncate(60);
+    let hash = Sha256::digest(url.as_bytes());
+    let hash: String = hash[..4].iter().map(|b| format!("{b:02x}")).collect();
+    let name = [slug(&host), path, hash]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("{name}.txt")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_names_are_plain_and_typed() {
+        assert_eq!(Runtime::upload_name("notes.md").unwrap(), "notes.md");
+        assert_eq!(
+            Runtime::upload_name("Page One.HTML").unwrap(),
+            "Page One.txt"
+        );
+        for bad in [
+            "../x.txt",
+            ".env",
+            "a/b.txt",
+            "a\\b.txt",
+            "x",
+            "run.sh",
+            ".txt",
+            "a..txt",
+            "",
+            "we;ird.txt",
+        ] {
+            assert!(Runtime::upload_name(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn web_files_are_named_after_the_url() {
+        let name = web_file_name("https://en.wikipedia.org/wiki/Nebula");
+        assert!(name.starts_with("en-wikipedia-org-wiki-nebula-"), "{name}");
+        assert!(name.ends_with(".txt"));
+        assert_ne!(
+            name,
+            web_file_name("https://en.wikipedia.org/wiki/Nebula?x=1")
+        );
+        assert!(!web_file_name("https://x.org/../../etc").contains('/'));
+    }
 
     #[test]
     fn ingest_paths_cannot_escape_the_directory() {

@@ -11,6 +11,15 @@ shutdown_drain_ms = 5000         # HTTP drain time on Ctrl-C
 ingest_dir = "data/ingest"       # /ingest may only read files inside here
 ingest_max_bytes = 4194304
 
+# Reading web pages: ones you send (/read) and ones you approve when Aster asks.
+# Aster never fetches anything on its own.
+[web]
+enabled = true
+timeout_secs = 15
+max_bytes = 2097152              # larger pages are cut off here
+max_redirects = 3
+allow_private = false            # true lets URLs reach private/LAN addresses
+
 [database]                       # restart required
 pool_size = 5
 acquire_timeout_ms = 5000

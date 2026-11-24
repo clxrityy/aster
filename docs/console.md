@@ -31,6 +31,9 @@
 | `/approve <n>` · `/deny <n>` | decide a request |
 | `/remember <text>` · `/forget <id>` | memories |
 | `/ingest <path>` | learn a file inside `server.ingest_dir` |
+| `/read <url>` | read a web page ([reading](reading.md)) |
+| `/upload <file>` | send a `.txt`/`.md`/`.aster`/`.html` file from this machine |
+| `/paste <name>` | paste text, then a line with just `.` to send (`/cancel` stops) |
 | `/set <key> <value>` · `/get <key>` · `/config [section]` | live config |
 | `/pause` · `/resume` | freeze/resume levels and initiative |
 | `/status` · `/history` | mind stats · level changes |

@@ -16,9 +16,11 @@ All routes except `/health/live` need `Authorization: Bearer <ASTER_OWNER_TOKEN>
 | POST | `/v1/teach` | `{"prompt", "reply"}` |
 | POST | `/v1/ingest` | `{"path"}` (inside `server.ingest_dir`) |
 | GET | `/v1/ingest/files` | files you could ingest |
+| POST | `/v1/ingest/upload` | `{"name", "text"}`: save into `uploads/` and ingest (up to `server.ingest_max_bytes`) |
+| POST | `/v1/read` | `{"url"}`: read a web page ([reading](reading.md)) |
 | GET | `/v1/outbound` | `?status=pending\|answered\|…\|all` |
 | POST | `/v1/outbound/{id}/answer` | `{"text"}` |
-| POST | `/v1/outbound/{id}/approve` · `/deny` | |
+| POST | `/v1/outbound/{id}/approve` · `/deny` | approving a request with a `source` URL reads that page |
 | GET | `/v1/runtime` | status, levels, mind stats |
 | POST | `/v1/runtime/pause` · `/resume` | |
 | GET | `/v1/state/history` | `?limit=` |
