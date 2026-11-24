@@ -4,6 +4,7 @@ aster learns and decides what aster is
 you help shape that process
 
 uses no external APIs
+reads only the web pages you send or approve
 
 - read my [blog](https://mjanglin.com/projects/dev/aster)
 - see [/docs](./docs)
