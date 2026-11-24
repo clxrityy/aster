@@ -25,8 +25,10 @@ use crate::{
 pub const ENGINE: &str = "neural";
 const MAGIC: &[u8; 5] = b"ASTE1";
 const HISTORY: usize = 240;
-/// Below this many training steps the network's guesses are noise; it stays quiet.
-const MIN_STEPS_TO_SPEAK: u64 = 50;
+/// Recent training points averaged to judge whether the network is ready.
+const READY_WINDOW: usize = 8;
+/// A sampled reply the network was less sure of than this is not offered.
+const MIN_CERTAINTY: f64 = 0.35;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope {
@@ -156,11 +158,14 @@ impl Cognition for NeuralMind {
             statistical,
             model,
             rng,
+            history,
             ..
         } = self;
-        let mut response = statistical.respond_with(context, &mut |text, exploration| {
-            propose(model, rng, text, exploration, params)
-        });
+        let recent_loss = recent_loss(history);
+        let mut response =
+            statistical.respond_with(context, &mut |text, exploration, notes| {
+                propose(model, rng, text, exploration, params, recent_loss, notes)
+            });
         response.trace.engine = ENGINE.into();
         response.trace.notes.append(&mut self.notes);
         response
@@ -269,16 +274,53 @@ impl Cognition for NeuralMind {
     }
 }
 
-/// The network's one candidate for this turn, if it has trained enough.
+/// Mean loss of the last few training points (smoother than one minibatch).
+fn recent_loss(history: &VecDeque<TrainPoint>) -> Option<f64> {
+    let recent: Vec<f64> = history
+        .iter()
+        .rev()
+        .take(READY_WINDOW)
+        .map(|p| f64::from(p.loss))
+        .filter(|l| l.is_finite())
+        .collect();
+    (!recent.is_empty()).then(|| recent.iter().sum::<f64>() / recent.len() as f64)
+}
+
+/// The network's one candidate for this turn, once it has trained enough to
+/// spell words. Says why in `notes` when it stays quiet.
 fn propose(
     model: &ByteModel,
     rng: &mut Rng,
     text: &str,
     exploration: f64,
     params: &NeuralParams,
+    recent_loss: Option<f64>,
+    notes: &mut Vec<String>,
 ) -> Option<Candidate> {
-    if model.steps() < MIN_STEPS_TO_SPEAK || params.weight == 0.0 {
+    if params.weight == 0.0 {
         return None;
+    }
+    if model.steps() < params.min_steps_to_speak {
+        notes.push(format!(
+            "neural quiet: {} of {} training steps",
+            model.steps(),
+            params.min_steps_to_speak
+        ));
+        return None;
+    }
+    match recent_loss {
+        Some(loss) if loss <= params.max_loss_to_speak => {}
+        Some(loss) => {
+            notes.push(format!(
+                "neural quiet: loss {loss:.2} > {:.2}",
+                params.max_loss_to_speak
+            ));
+            return None;
+        }
+        None => {
+            notes.push("neural quiet: no training history yet".into());
+            return None;
+        }
     }
     let mut prefix: Vec<u8> = text
         .replace(['\t', '\n', '\r'], " ")
@@ -286,28 +328,45 @@ fn propose(
         .as_bytes()
         .to_vec();
     prefix.push(b'\t');
-    let temperature = params.temperature * (0.75 + exploration);
-    let sample = model
-        .sample(
+    let temperature = params.temperature * (0.85 + 0.5 * exploration);
+    // Best of a few: keep the continuation the network was surest of.
+    let mut best: Option<(String, f64)> = None;
+    for _ in 0..params.samples.max(1) {
+        let Ok(sample) = model.sample(
             &prefix,
             params.max_reply_bytes,
             b'\n',
             temperature,
             params.top_k,
             rng,
-        )
-        .ok()?;
-    let reply = String::from_utf8(sample.bytes).ok()?;
-    let reply = reply.trim();
-    if reply.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+        ) else {
+            continue;
+        };
+        let Ok(reply) = String::from_utf8(sample.bytes) else {
+            continue;
+        };
+        let reply = reply.trim();
+        if reply.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, lp)| sample.mean_log_prob > *lp)
+        {
+            best = Some((reply.to_string(), sample.mean_log_prob));
+        }
+    }
+    let (reply, mean_log_prob) = best?;
+    // Geometric-mean byte probability: how sure the network was, 0..1.
+    let certainty = mean_log_prob.exp().clamp(0.0, 1.0);
+    if certainty < MIN_CERTAINTY {
+        notes.push(format!("neural candidate dropped: certainty {certainty:.2}"));
         return None;
     }
-    // Geometric-mean byte probability: how sure the network was, 0..1.
-    let certainty = sample.mean_log_prob.exp().clamp(0.0, 1.0);
     Some(Candidate {
-        text: reply.to_string(),
+        text: reply,
         source: CandidateSource::Neural,
-        score: certainty.sqrt() * params.weight,
+        score: certainty * params.weight,
         components: BTreeMap::from([
             ("certainty".into(), certainty),
             ("temperature".into(), temperature),
@@ -338,6 +397,11 @@ mod tests {
         params.neural.min_corpus_bytes = 16;
         params.neural.train_steps_per_tick = 300;
         params.neural.max_train_ms_per_tick = 10_000;
+        // A toy network on a toy corpus: let it speak early, and judge it on
+        // whether it spoke, not on its loss or vocabulary.
+        params.neural.min_steps_to_speak = 50;
+        params.neural.max_loss_to_speak = 100.0;
+        params.neural.min_known_words = 0.0;
         params
     }
 
@@ -392,7 +456,10 @@ mod tests {
         let report = mind.train(&params, Duration::from_secs(30)).unwrap();
         // The time cap may stop a slow machine early; it must still get past
         // the point where the network is allowed to speak.
-        assert!(report.total_steps > MIN_STEPS_TO_SPEAK, "{report:?}");
+        assert!(
+            report.total_steps > params.neural.min_steps_to_speak,
+            "{report:?}"
+        );
         assert!(report.loss.is_finite());
         assert_eq!(mind.training_history().len(), 2);
         // A taught prompt: on an unseen one, a network this small may stop at
@@ -415,6 +482,35 @@ mod tests {
         let stats = mind.stats();
         assert_eq!(stats["neural_steps"], report.total_steps as f64);
         assert!(stats["neural_corpus_bytes"] > 16.0);
+    }
+
+    #[test]
+    fn an_undertrained_network_stays_quiet_and_says_why() {
+        let mut params = params();
+        params.neural.min_steps_to_speak = 1_000_000;
+        let mut mind = taught(&params);
+        mind.train(&params, Duration::from_secs(30));
+        let response = ask(mind.as_mut(), "how are you", &params);
+        assert!(
+            !response
+                .trace
+                .candidates
+                .iter()
+                .any(|c| c.source == CandidateSource::Neural)
+        );
+        assert!(
+            response
+                .trace
+                .notes
+                .iter()
+                .any(|n| n.starts_with("neural quiet")),
+            "{:?}",
+            response.trace.notes
+        );
+        params.neural.min_steps_to_speak = 1;
+        params.neural.max_loss_to_speak = 0.0001;
+        let response = ask(mind.as_mut(), "how are you", &params);
+        assert!(response.trace.notes.iter().any(|n| n.contains("loss")));
     }
 
     #[test]

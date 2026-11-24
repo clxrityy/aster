@@ -451,7 +451,7 @@ impl StatisticalMind {
     pub(crate) fn respond_with(
         &mut self,
         context: &TurnContext<'_>,
-        extra: &mut dyn FnMut(&str, f64) -> Option<Candidate>,
+        extra: &mut dyn FnMut(&str, f64, &mut Vec<String>) -> Option<Candidate>,
     ) -> Response {
         let params = context.params;
         let levels = context.levels;
@@ -628,13 +628,30 @@ impl StatisticalMind {
             }
         }
 
-        if let Some(candidate) = extra(context.text, exploration) {
+        if let Some(mut candidate) = extra(context.text, exploration, &mut notes) {
             let duplicate = scored
                 .iter()
                 .any(|(c, _)| normalize(&c.text) == normalize(&candidate.text));
+            let reply_words = words(&tokens(&candidate.text));
+            let known = reply_words
+                .iter()
+                .filter(|w| self.knows(w) || is_stopword(w))
+                .count();
+            let share = if reply_words.is_empty() {
+                0.0
+            } else {
+                known as f64 / reply_words.len() as f64
+            };
             if duplicate {
                 notes.push("neural candidate repeated an existing one".into());
+            } else if share < params.neural.min_known_words {
+                notes.push(format!(
+                    "neural candidate dropped: {known}/{} words known",
+                    reply_words.len()
+                ));
             } else {
+                candidate.score *= share;
+                candidate.components.insert("known_words".into(), share);
                 let text = candidate.text.clone();
                 scored.push((candidate, Chosen::Text(text)));
             }
@@ -800,7 +817,7 @@ impl Cognition for StatisticalMind {
     }
 
     fn respond(&mut self, context: &TurnContext<'_>) -> Response {
-        self.respond_with(context, &mut |_, _| None)
+        self.respond_with(context, &mut |_, _, _| None)
     }
 
     fn learn(&mut self, signal: LearningSignal, params: &CognitionParams) -> LearnOutcome {
@@ -1216,6 +1233,54 @@ mod tests {
         teach(&mut mind, "hello there", "Hello! What are we doing today?");
         teach(&mut mind, "hello", "Hi.");
         mind
+    }
+
+    fn with_extra(mind: &mut StatisticalMind, text: &str, reply: &str) -> Response {
+        let levels = RegulatoryState::default();
+        let params = params();
+        mind.respond_with(
+            &TurnContext {
+                turn_id: Uuid::new_v4(),
+                text,
+                levels: &levels,
+                params: &params,
+                avoid: None,
+            },
+            &mut |_, _, _| {
+                Some(Candidate {
+                    text: reply.into(),
+                    source: CandidateSource::Neural,
+                    score: 0.6,
+                    components: BTreeMap::new(),
+                })
+            },
+        )
+    }
+
+    #[test]
+    fn extra_candidates_made_of_unknown_words_are_dropped() {
+        let mut mind = two_greetings();
+        let jumble = with_extra(&mut mind, "hello there", "hel thre wht ar tdy");
+        assert!(
+            !jumble
+                .trace
+                .candidates
+                .iter()
+                .any(|c| c.source == CandidateSource::Neural)
+        );
+        assert!(
+            jumble.trace.notes.iter().any(|n| n.contains("words known")),
+            "{:?}",
+            jumble.trace.notes
+        );
+        let words = with_extra(&mut mind, "hello there", "hello, what are we doing");
+        let neural = words
+            .trace
+            .candidates
+            .iter()
+            .find(|c| c.source == CandidateSource::Neural)
+            .expect("real words are kept");
+        assert_eq!(neural.components["known_words"], 1.0);
     }
 
     #[test]
