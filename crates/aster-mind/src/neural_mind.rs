@@ -344,7 +344,8 @@ fn propose(
         let Ok(reply) = String::from_utf8(sample.bytes) else {
             continue;
         };
-        let reply = reply.trim();
+        // A tab ends the prompt part of a training line, never a reply.
+        let reply = reply.split('\t').next().unwrap_or_default().trim();
         if reply.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
             continue;
         }

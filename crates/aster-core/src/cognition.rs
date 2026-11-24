@@ -93,7 +93,7 @@ impl Default for NeuralParams {
             hidden: 256,
             learning_rate: 0.003,
             batch: 32,
-            train_steps_per_tick: 8,
+            train_steps_per_tick: 64,
             max_train_ms_per_tick: 200,
             min_corpus_bytes: 512,
             weight: 0.6,

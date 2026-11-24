@@ -43,7 +43,7 @@ Prefer a neural candidate ("Use this") and it becomes a learned reply, which the
 | `context` | 32 | bytes the network sees per prediction |
 | `embed_dim` · `hidden` | 24 · 256 | network size |
 | `learning_rate` · `batch` | 0.003 · 32 | training |
-| `train_steps_per_tick` | 8 | 0 pauses training |
+| `train_steps_per_tick` | 64 | 0 pauses training |
 | `max_train_ms_per_tick` | 200 | hard time cap per tick |
 | `min_corpus_bytes` | 512 | wait for this much training text |
 | `weight` | 0.6 | scales its candidate's score; 0 silences it |
@@ -60,7 +60,7 @@ The network reads bytes, not words. It has to learn spelling before it can say a
 
 - **Give it more text.** A few taught replies are a few KB. It needs tens of KB of real sentences: [read](reading.md) pages, upload notes, or ingest files. `neural_corpus_bytes` on the Neural page shows how much it has. Aim for 50 KB or more.
 - **Let it train.** Watch the loss on the Neural page. Around 2.5 it babbles, under about 1.5 it spells common words, and under 1.0 it starts to sound like what it read. It stays quiet until `max_loss_to_speak`.
-- **Train faster** on a machine with spare CPU: `aster-set cognition.neural.train_steps_per_tick 32` and `aster-set cognition.neural.max_train_ms_per_tick 800`.
+- **Train faster** on a machine with spare CPU: `aster-set cognition.neural.max_train_ms_per_tick 800` and `aster-set cognition.neural.train_steps_per_tick 256`. A step takes about 2 ms on a laptop, often more on a small VPS. Expect half-words around 20k steps and mostly real words with some fragments around 50k (on about 100 KB of text). Until then it stays quiet, and the trace says why.
 - **Rate it.** Use `-` on bad neural candidates and "Use this" on good ones. A preferred one becomes a learned reply, and the network trains on it too.
 - **Make it stricter** if it still slips through: lower `temperature` (0.4) or `top_k` (3), or raise `min_known_words` (0.9).
 
